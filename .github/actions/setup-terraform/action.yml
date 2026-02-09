@@ -1,0 +1,105 @@
+# -----------------------------------------------------------------------------
+# setup-terraform/action.yml - Composite Action for Terraform Setup
+# -----------------------------------------------------------------------------
+# Purpose: Reusable composite action that installs Terraform CLI, authenticates
+# with HCP Terraform, initializes the working directory, and verifies the
+# Terraform version meets the minimum requirement (>= 1.9.0).
+#
+# This action is used by all workflow jobs that need Terraform, ensuring
+# consistent setup across PR checks and deployment pipelines.
+#
+# Usage:
+#   - name: Setup Terraform
+#     uses: ./.github/actions/setup-terraform
+#     with:
+#       working-directory: infra/environments/dev
+#       hcp-token: ${{ secrets.HCP_TERRAFORM_TOKEN }}
+# -----------------------------------------------------------------------------
+
+name: "Setup Terraform"
+description: "Install Terraform CLI, authenticate with HCP Terraform, and initialize the working directory"
+
+inputs:
+  working-directory:
+    description: "Path to the Terraform environment directory (relative to repository root)"
+    required: false
+    default: "infra/environments/dev"
+  hcp-token:
+    description: "HCP Terraform API token for authentication"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    # Step 1: Install Terraform CLI using the official HashiCorp action
+    - name: Install Terraform CLI
+      uses: hashicorp/setup-terraform@v3
+      with:
+        cli_config_credentials_token: ${{ inputs.hcp-token }}
+
+    # Step 2: Verify Terraform version meets minimum requirement (>= 1.9.0)
+    - name: Verify Terraform version
+      shell: bash
+      run: |
+        echo "::group::Terraform Version Check"
+
+        TERRAFORM_VERSION=$(terraform version -json | jq -r '.terraform_version')
+        echo "Installed Terraform version: ${TERRAFORM_VERSION}"
+
+        # Parse major, minor, patch from version string
+        IFS='.' read -r MAJOR MINOR PATCH <<< "${TERRAFORM_VERSION}"
+
+        # Verify >= 1.9.0
+        MEETS_REQUIREMENT=false
+        if [ "${MAJOR}" -gt 1 ]; then
+          MEETS_REQUIREMENT=true
+        elif [ "${MAJOR}" -eq 1 ] && [ "${MINOR}" -ge 9 ]; then
+          MEETS_REQUIREMENT=true
+        fi
+
+        if [ "${MEETS_REQUIREMENT}" = "false" ]; then
+          echo "::error::Terraform version ${TERRAFORM_VERSION} does not meet minimum requirement >= 1.9.0"
+          exit 1
+        fi
+
+        echo "Terraform version ${TERRAFORM_VERSION} meets requirement >= 1.9.0"
+        echo "::endgroup::"
+
+    # Step 3: Verify HCP Terraform authentication
+    - name: Verify HCP Terraform authentication
+      shell: bash
+      run: |
+        echo "::group::HCP Terraform Authentication"
+
+        if [ -z "${{ inputs.hcp-token }}" ]; then
+          echo "::error::HCP Terraform token is not set"
+          exit 1
+        fi
+
+        echo "HCP Terraform token is configured"
+        echo "::endgroup::"
+
+    # Step 4: Initialize Terraform in the specified working directory
+    - name: Initialize Terraform
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        echo "::group::Terraform Init"
+        echo "Working directory: ${{ inputs.working-directory }}"
+
+        terraform init -input=false
+
+        echo "Terraform initialized successfully"
+        echo "::endgroup::"
+
+    # Step 5: Display initialization summary
+    - name: Display setup summary
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        echo "::group::Setup Summary"
+        echo "Terraform version: $(terraform version -json | jq -r '.terraform_version')"
+        echo "Working directory: ${{ inputs.working-directory }}"
+        echo "Providers initialized:"
+        terraform providers
+        echo "::endgroup::"

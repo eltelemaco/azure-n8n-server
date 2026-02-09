@@ -1,0 +1,962 @@
+# -----------------------------------------------------------------------------
+# terraform-deploy.yml - Terraform Deployment Pipeline
+# -----------------------------------------------------------------------------
+# Purpose: Full deployment workflow implementing the agent team pattern.
+# Triggered on push to main (when infrastructure files change) or manual dispatch.
+#
+# Agent Team Pattern:
+#   - Pre-Flight Agent:    Validates environment readiness
+#   - Builder Agent:       Formats, validates, plans, and applies Terraform
+#   - Validator Agent:     Security scanning, plan review, post-apply checks
+#   - Documentation Agent: Updates README with deployment outputs
+#   - Status Agent:        Posts deployment summary
+#
+# Jobs (sequential pipeline with conditional approval gate):
+#   1. preflight-validation     - Check Terraform, HCP, Azure readiness
+#   2. builder-format-validate  - terraform fmt + terraform validate
+#   3. validator-security-scan  - tflint + checkov scanning
+#   4. builder-plan             - Generate plan, upload artifacts
+#   5. validator-plan-review    - Risk assessment, set approval flag
+#   6. approval-gate            - Manual approval (MEDIUM/HIGH risk only)
+#   7. builder-apply            - terraform apply with approved plan
+#   8. validator-post-apply     - Smoke tests, resource verification
+#   9. documentation-update     - Update README with terraform outputs
+#  10. status-final             - Post deployment summary
+# -----------------------------------------------------------------------------
+
+name: "Terraform Deploy"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "infra/**/*.tf"
+  workflow_dispatch:
+    inputs:
+      skip_approval:
+        description: "Skip approval gate (LOW risk only)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+# Ensure only one deployment runs at a time
+concurrency:
+  group: terraform-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+# Required for Azure OIDC authentication
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+  actions: read
+
+env:
+  TF_WORKING_DIR: infra/environments/dev
+  TF_VERSION: "1.9.0"
+  TFLINT_VERSION: "v0.53.0"
+  HCP_ORG: "TelemacoInfraLabs"
+  HCP_WORKSPACE: "azure-n8n-server"
+
+# =============================================================================
+# JOB 1: Pre-Flight Validation (Pre-Flight Agent)
+# =============================================================================
+jobs:
+  preflight-validation:
+    name: "Pre-Flight Agent: Environment Validation"
+    runs-on: ubuntu-latest
+    outputs:
+      terraform_version: ${{ steps.tf-version.outputs.version }}
+      workspace_status: ${{ steps.hcp-check.outputs.status }}
+      azure_connected: ${{ steps.azure-check.outputs.connected }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check Terraform version
+        id: tf-version
+        run: |
+          echo "::group::Terraform Version Check"
+          # Install Terraform
+          wget -qO- https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip | funzip > /usr/local/bin/terraform 2>/dev/null || {
+            curl -fsSL https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip -o tf.zip
+            unzip -o tf.zip -d /usr/local/bin/
+            rm -f tf.zip
+          }
+          chmod +x /usr/local/bin/terraform
+
+          INSTALLED_VERSION=$(terraform version -json | jq -r '.terraform_version')
+          echo "version=${INSTALLED_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Terraform version: ${INSTALLED_VERSION}"
+
+          # Validate minimum version requirement
+          REQUIRED_VERSION="1.9.0"
+          if [ "$(printf '%s\n' "$REQUIRED_VERSION" "$INSTALLED_VERSION" | sort -V | head -n1)" != "$REQUIRED_VERSION" ]; then
+            echo "::error::Terraform version ${INSTALLED_VERSION} does not meet minimum requirement ${REQUIRED_VERSION}"
+            exit 1
+          fi
+          echo "Terraform version ${INSTALLED_VERSION} meets minimum requirement (>= ${REQUIRED_VERSION})"
+          echo "::endgroup::"
+
+      - name: Verify HCP Terraform token
+        id: hcp-check
+        env:
+          TF_TOKEN_app_terraform_io: ${{ secrets.HCP_TERRAFORM_TOKEN }}
+        run: |
+          echo "::group::HCP Terraform Token Validation"
+          if [ -z "$TF_TOKEN_app_terraform_io" ]; then
+            echo "::error::HCP_TERRAFORM_TOKEN secret is not configured"
+            echo "status=missing_token" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # Verify token by checking workspace status via API
+          HTTP_STATUS=$(curl -s -o /tmp/workspace_response.json -w "%{http_code}" \
+            --header "Authorization: Bearer ${TF_TOKEN_app_terraform_io}" \
+            --header "Content-Type: application/vnd.api+json" \
+            "https://app.terraform.io/api/v2/organizations/${HCP_ORG}/workspaces/${HCP_WORKSPACE}")
+
+          if [ "$HTTP_STATUS" -eq 200 ]; then
+            WORKSPACE_ID=$(jq -r '.data.id' /tmp/workspace_response.json)
+            EXECUTION_MODE=$(jq -r '.data.attributes."execution-mode"' /tmp/workspace_response.json)
+            echo "HCP workspace '${HCP_WORKSPACE}' found (ID: ${WORKSPACE_ID}, mode: ${EXECUTION_MODE})"
+            echo "status=ready" >> "$GITHUB_OUTPUT"
+
+            # Check for active runs that might cause state lock conflicts
+            ACTIVE_RUNS=$(curl -s \
+              --header "Authorization: Bearer ${TF_TOKEN_app_terraform_io}" \
+              --header "Content-Type: application/vnd.api+json" \
+              "https://app.terraform.io/api/v2/workspaces/${WORKSPACE_ID}/runs?filter%5Bstatus%5D=planning,applying,planned" \
+              | jq -r '.data | length')
+
+            if [ "$ACTIVE_RUNS" -gt 0 ]; then
+              echo "::warning::There are ${ACTIVE_RUNS} active run(s) in the workspace. State lock conflicts possible."
+            fi
+          elif [ "$HTTP_STATUS" -eq 401 ]; then
+            echo "::error::HCP Terraform token is invalid or expired"
+            echo "status=invalid_token" >> "$GITHUB_OUTPUT"
+            exit 1
+          elif [ "$HTTP_STATUS" -eq 404 ]; then
+            echo "::error::Workspace '${HCP_WORKSPACE}' not found in organization '${HCP_ORG}'"
+            echo "status=workspace_not_found" >> "$GITHUB_OUTPUT"
+            exit 1
+          else
+            echo "::error::Unexpected HTTP status ${HTTP_STATUS} from HCP Terraform API"
+            echo "status=error" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "::endgroup::"
+
+      - name: Verify Azure OIDC credentials
+        id: azure-check
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Validate Azure resources
+        id: azure-resources
+        run: |
+          echo "::group::Azure Resource Validation"
+
+          # Verify target resource group exists
+          RG_NAME="telemaco-dev"
+          if az group show --name "$RG_NAME" --output none 2>/dev/null; then
+            echo "Resource group '${RG_NAME}' exists"
+            echo "connected=true" >> "$GITHUB_OUTPUT"
+
+            # Show resource group details
+            az group show --name "$RG_NAME" --output table
+          else
+            echo "::error::Resource group '${RG_NAME}' does not exist"
+            echo "connected=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # Verify subscription access
+          SUBSCRIPTION=$(az account show --output json)
+          echo "Subscription: $(echo $SUBSCRIPTION | jq -r '.name') ($(echo $SUBSCRIPTION | jq -r '.id'))"
+          echo "State: $(echo $SUBSCRIPTION | jq -r '.state')"
+          echo "::endgroup::"
+
+      - name: Pre-flight summary
+        if: always()
+        run: |
+          echo "## Pre-Flight Validation Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Terraform Version | ${{ steps.tf-version.outputs.version || 'FAILED' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| HCP Workspace | ${{ steps.hcp-check.outputs.status || 'FAILED' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Azure Connection | ${{ steps.azure-resources.outputs.connected || 'FAILED' }} |" >> "$GITHUB_STEP_SUMMARY"
+
+  # =============================================================================
+  # JOB 2: Format and Validate (Builder Agent)
+  # =============================================================================
+  builder-format-validate:
+    name: "Builder Agent: Format & Validate"
+    runs-on: ubuntu-latest
+    needs: [preflight-validation]
+    defaults:
+      run:
+        working-directory: infra/environments/dev
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: ./.github/actions/setup-terraform
+        with:
+          working-directory: infra/environments/dev
+          hcp-token: ${{ secrets.HCP_TERRAFORM_TOKEN }}
+
+      - name: Terraform format check
+        id: fmt
+        run: |
+          echo "::group::Terraform Format Check"
+          # Check formatting across the entire infra directory
+          cd "$GITHUB_WORKSPACE"
+          if terraform fmt -check -recursive infra/; then
+            echo "All Terraform files are properly formatted"
+            echo "status=pass" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Terraform files are not properly formatted. Run 'terraform fmt -recursive' locally."
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "::endgroup::"
+
+      - name: Terraform validate
+        id: validate
+        run: |
+          echo "::group::Terraform Validate"
+          terraform validate -no-color
+          echo "::endgroup::"
+
+      - name: Format & validate summary
+        if: always()
+        run: |
+          echo "## Builder Agent: Format & Validate" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| terraform fmt | ${{ steps.fmt.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| terraform validate | ${{ steps.validate.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
+
+  # =============================================================================
+  # JOB 3: Security Scanning (Validator Agent)
+  # =============================================================================
+  validator-security-scan:
+    name: "Validator Agent: Security Scan"
+    runs-on: ubuntu-latest
+    needs: [builder-format-validate]
+    defaults:
+      run:
+        working-directory: infra/environments/dev
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: ./.github/actions/setup-terraform
+        with:
+          working-directory: infra/environments/dev
+          hcp-token: ${{ secrets.HCP_TERRAFORM_TOKEN }}
+
+      - name: Install tflint
+        run: |
+          curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+          tflint --version
+
+      - name: Run tflint
+        id: tflint
+        continue-on-error: true
+        run: |
+          echo "::group::tflint Results"
+          # Use project tflint config if available
+          if [ -f "$GITHUB_WORKSPACE/infra/.tflint.hcl" ]; then
+            tflint --config="$GITHUB_WORKSPACE/infra/.tflint.hcl" --init
+            tflint --config="$GITHUB_WORKSPACE/infra/.tflint.hcl" --format=compact || true
+          else
+            tflint --init
+            tflint --format=compact || true
+          fi
+          echo "::endgroup::"
+
+      - name: Install checkov
+        run: |
+          pip install checkov
+          checkov --version
+
+      - name: Run checkov
+        id: checkov
+        continue-on-error: true
+        run: |
+          echo "::group::Checkov Security Scan"
+          cd "$GITHUB_WORKSPACE"
+
+          CHECKOV_ARGS="--directory infra/ --framework terraform --output cli --output json --output-file-path console,checkov-results.json"
+
+          # Use project checkov config if available
+          if [ -f "infra/.checkov.yaml" ]; then
+            CHECKOV_ARGS="$CHECKOV_ARGS --config-file infra/.checkov.yaml"
+          fi
+
+          checkov $CHECKOV_ARGS || true
+          echo "::endgroup::"
+
+      - name: Evaluate scan results
+        run: |
+          echo "::group::Security Scan Evaluation"
+
+          # Check for CRITICAL findings from checkov
+          if [ -f "$GITHUB_WORKSPACE/checkov-results.json" ]; then
+            CRITICAL_COUNT=$(jq -r '[.results.failed_checks[]? | select(.severity == "CRITICAL")] | length' "$GITHUB_WORKSPACE/checkov-results.json" 2>/dev/null || echo "0")
+
+            if [ "$CRITICAL_COUNT" -gt 0 ]; then
+              echo "::error::Found ${CRITICAL_COUNT} CRITICAL security finding(s). Deployment blocked."
+              exit 1
+            fi
+
+            TOTAL_FAILED=$(jq -r '.results.failed_checks | length' "$GITHUB_WORKSPACE/checkov-results.json" 2>/dev/null || echo "0")
+            TOTAL_PASSED=$(jq -r '.results.passed_checks | length' "$GITHUB_WORKSPACE/checkov-results.json" 2>/dev/null || echo "0")
+            echo "Checkov results: ${TOTAL_PASSED} passed, ${TOTAL_FAILED} failed (0 CRITICAL)"
+          else
+            echo "No checkov results file found - scan may have been skipped"
+          fi
+
+          echo "::endgroup::"
+
+      - name: Security scan summary
+        if: always()
+        run: |
+          echo "## Validator Agent: Security Scan" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Scanner | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| tflint | ${{ steps.tflint.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| checkov | ${{ steps.checkov.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "_CRITICAL findings block deployment. HIGH/MEDIUM/LOW are reported but do not block._" >> "$GITHUB_STEP_SUMMARY"
+
+  # =============================================================================
+  # JOB 4: Plan Generation (Builder Agent)
+  # =============================================================================
+  builder-plan:
+    name: "Builder Agent: Terraform Plan"
+    runs-on: ubuntu-latest
+    needs: [validator-security-scan]
+    defaults:
+      run:
+        working-directory: infra/environments/dev
+    outputs:
+      plan_exitcode: ${{ steps.plan.outputs.exitcode }}
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: ./.github/actions/setup-terraform
+        with:
+          working-directory: infra/environments/dev
+          hcp-token: ${{ secrets.HCP_TERRAFORM_TOKEN }}
+
+      - name: Terraform plan
+        id: plan
+        run: |
+          echo "::group::Terraform Plan"
+
+          # Generate binary plan file
+          set +e
+          terraform plan -detailed-exitcode -out=tfplan.binary -no-color 2>&1 | tee plan_output.txt
+          EXITCODE=$?
+          set -e
+
+          echo "exitcode=${EXITCODE}" >> "$GITHUB_OUTPUT"
+
+          case $EXITCODE in
+            0)
+              echo "No changes detected"
+              echo "has_changes=false" >> "$GITHUB_OUTPUT"
+              ;;
+            1)
+              echo "::error::Terraform plan failed"
+              exit 1
+              ;;
+            2)
+              echo "Changes detected in plan"
+              echo "has_changes=true" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+          echo "::endgroup::"
+
+      - name: Convert plan to JSON
+        if: steps.plan.outputs.has_changes == 'true'
+        run: |
+          terraform show -json tfplan.binary > tfplan.json
+          echo "Plan JSON generated ($(wc -c < tfplan.json) bytes)"
+
+      - name: Upload plan artifacts
+        if: steps.plan.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: |
+            infra/environments/dev/tfplan.binary
+            infra/environments/dev/tfplan.json
+            infra/environments/dev/plan_output.txt
+          retention-days: 90
+
+      - name: Plan summary
+        if: always()
+        run: |
+          echo "## Builder Agent: Terraform Plan" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f plan_output.txt ]; then
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            # Truncate if too long for step summary
+            head -200 plan_output.txt >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Exit code**: ${{ steps.plan.outputs.exitcode }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Has changes**: ${{ steps.plan.outputs.has_changes }}" >> "$GITHUB_STEP_SUMMARY"
+
+  # =============================================================================
+  # JOB 5: Plan Review (Validator Agent)
+  # =============================================================================
+  validator-plan-review:
+    name: "Validator Agent: Plan Review"
+    runs-on: ubuntu-latest
+    needs: [builder-plan]
+    if: needs.builder-plan.outputs.has_changes == 'true'
+    outputs:
+      risk_level: ${{ steps.review.outputs.risk_level }}
+      requires_approval: ${{ steps.review.outputs.requires_approval }}
+      resource_add: ${{ steps.review.outputs.resource_add }}
+      resource_change: ${{ steps.review.outputs.resource_change }}
+      resource_destroy: ${{ steps.review.outputs.resource_destroy }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download plan artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: infra/environments/dev/
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Analyze plan
+        id: review
+        run: |
+          echo "::group::Plan Risk Assessment"
+
+          PLAN_JSON="infra/environments/dev/tfplan.json"
+
+          if [ -f ".github/scripts/parse-plan.py" ]; then
+            # Use the project parse-plan.py script
+            RESULT=$(python .github/scripts/parse-plan.py "$PLAN_JSON")
+            echo "Parse script output: ${RESULT}"
+
+            RISK_LEVEL=$(echo "$RESULT" | jq -r '.risk_level')
+            REQUIRES_APPROVAL=$(echo "$RESULT" | jq -r '.requires_approval')
+            ADD_COUNT=$(echo "$RESULT" | jq -r '.add')
+            CHANGE_COUNT=$(echo "$RESULT" | jq -r '.change')
+            DESTROY_COUNT=$(echo "$RESULT" | jq -r '.destroy')
+          else
+            # Fallback: inline plan analysis
+            echo "::warning::parse-plan.py not found, using inline analysis"
+
+            ADD_COUNT=$(jq '[.resource_changes[]? | select(.change.actions | contains(["create"]))] | length' "$PLAN_JSON" 2>/dev/null || echo "0")
+            CHANGE_COUNT=$(jq '[.resource_changes[]? | select(.change.actions | contains(["update"]))] | length' "$PLAN_JSON" 2>/dev/null || echo "0")
+            DESTROY_COUNT=$(jq '[.resource_changes[]? | select(.change.actions | contains(["delete"]))] | length' "$PLAN_JSON" 2>/dev/null || echo "0")
+            REPLACE_COUNT=$(jq '[.resource_changes[]? | select(.change.actions | contains(["delete", "create"]))] | length' "$PLAN_JSON" 2>/dev/null || echo "0")
+
+            # Determine risk level
+            if [ "$DESTROY_COUNT" -gt 0 ] || [ "$REPLACE_COUNT" -gt 0 ]; then
+              RISK_LEVEL="HIGH"
+              REQUIRES_APPROVAL="true"
+            elif [ "$CHANGE_COUNT" -gt 0 ]; then
+              RISK_LEVEL="MEDIUM"
+              REQUIRES_APPROVAL="true"
+            else
+              RISK_LEVEL="LOW"
+              REQUIRES_APPROVAL="false"
+            fi
+          fi
+
+          echo "risk_level=${RISK_LEVEL}" >> "$GITHUB_OUTPUT"
+          echo "requires_approval=${REQUIRES_APPROVAL}" >> "$GITHUB_OUTPUT"
+          echo "resource_add=${ADD_COUNT}" >> "$GITHUB_OUTPUT"
+          echo "resource_change=${CHANGE_COUNT}" >> "$GITHUB_OUTPUT"
+          echo "resource_destroy=${DESTROY_COUNT}" >> "$GITHUB_OUTPUT"
+
+          echo "Risk Level: ${RISK_LEVEL}"
+          echo "Requires Approval: ${REQUIRES_APPROVAL}"
+          echo "Resources: +${ADD_COUNT} ~${CHANGE_COUNT} -${DESTROY_COUNT}"
+
+          echo "::endgroup::"
+
+      - name: Plan review summary
+        if: always()
+        run: |
+          RISK_LEVEL="${{ steps.review.outputs.risk_level }}"
+
+          # Set risk badge color
+          case "$RISK_LEVEL" in
+            LOW)  RISK_EMOJI="LOW" ;;
+            MEDIUM) RISK_EMOJI="MEDIUM" ;;
+            HIGH) RISK_EMOJI="HIGH" ;;
+            *) RISK_EMOJI="UNKNOWN" ;;
+          esac
+
+          echo "## Validator Agent: Plan Review" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Risk Assessment: ${RISK_EMOJI}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Metric | Count |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Resources to add | ${{ steps.review.outputs.resource_add }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Resources to change | ${{ steps.review.outputs.resource_change }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Resources to destroy | ${{ steps.review.outputs.resource_destroy }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Requires approval**: ${{ steps.review.outputs.requires_approval }}" >> "$GITHUB_STEP_SUMMARY"
+
+  # =============================================================================
+  # JOB 6: Approval Gate (Manual)
+  # =============================================================================
+  approval-gate:
+    name: "Approval Gate: Manual Review"
+    runs-on: ubuntu-latest
+    needs: [validator-plan-review]
+    if: needs.validator-plan-review.outputs.requires_approval == 'true'
+    environment:
+      name: dev-approval
+    steps:
+      - name: Approval granted
+        run: |
+          echo "## Approval Gate" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Deployment approved for execution." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Risk level**: ${{ needs.validator-plan-review.outputs.risk_level }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Changes**: +${{ needs.validator-plan-review.outputs.resource_add }} ~${{ needs.validator-plan-review.outputs.resource_change }} -${{ needs.validator-plan-review.outputs.resource_destroy }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Approved by**: ${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Approved at**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_STEP_SUMMARY"
+
+  # =============================================================================
+  # JOB 7: Apply (Builder Agent)
+  # =============================================================================
+  builder-apply:
+    name: "Builder Agent: Terraform Apply"
+    runs-on: ubuntu-latest
+    needs: [builder-plan, validator-plan-review, approval-gate]
+    # Run if:
+    # - approval-gate was skipped (LOW risk, no approval needed) AND plan has changes
+    # - OR approval-gate succeeded (MEDIUM/HIGH risk, approval granted)
+    if: |
+      always() &&
+      needs.builder-plan.result == 'success' &&
+      needs.builder-plan.outputs.has_changes == 'true' &&
+      needs.validator-plan-review.result == 'success' &&
+      (needs.approval-gate.result == 'success' || needs.approval-gate.result == 'skipped')
+    defaults:
+      run:
+        working-directory: infra/environments/dev
+    outputs:
+      apply_result: ${{ steps.apply.outputs.result }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: ./.github/actions/setup-terraform
+        with:
+          working-directory: infra/environments/dev
+          hcp-token: ${{ secrets.HCP_TERRAFORM_TOKEN }}
+
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: infra/environments/dev/
+
+      - name: Terraform apply
+        id: apply
+        run: |
+          echo "::group::Terraform Apply"
+
+          if [ ! -f tfplan.binary ]; then
+            echo "::error::Plan file not found. Cannot apply without a plan."
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "Applying Terraform plan..."
+          echo "Risk level: ${{ needs.validator-plan-review.outputs.risk_level }}"
+          echo "Expected changes: +${{ needs.validator-plan-review.outputs.resource_add }} ~${{ needs.validator-plan-review.outputs.resource_change }} -${{ needs.validator-plan-review.outputs.resource_destroy }}"
+          echo ""
+
+          if terraform apply -no-color tfplan.binary; then
+            echo "result=success" >> "$GITHUB_OUTPUT"
+            echo "Terraform apply completed successfully"
+          else
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+            echo "::error::Terraform apply failed"
+            exit 1
+          fi
+
+          echo "::endgroup::"
+
+      - name: Capture outputs
+        if: steps.apply.outputs.result == 'success'
+        run: |
+          # Save terraform outputs for downstream jobs
+          terraform output -json > terraform_outputs.json
+          echo "Terraform outputs captured"
+
+      - name: Upload outputs artifact
+        if: steps.apply.outputs.result == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-outputs
+          path: infra/environments/dev/terraform_outputs.json
+          retention-days: 90
+
+      - name: Apply summary
+        if: always()
+        run: |
+          echo "## Builder Agent: Terraform Apply" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Result**: ${{ steps.apply.outputs.result || 'failed' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Risk level**: ${{ needs.validator-plan-review.outputs.risk_level }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Commit**: ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Triggered by**: ${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"
+
+  # =============================================================================
+  # JOB 8: Post-Apply Validation (Validator Agent)
+  # =============================================================================
+  validator-post-apply:
+    name: "Validator Agent: Post-Apply Validation"
+    runs-on: ubuntu-latest
+    needs: [builder-apply]
+    if: needs.builder-apply.outputs.apply_result == 'success'
+    outputs:
+      validation_result: ${{ steps.validate.outputs.result }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure OIDC login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Download terraform outputs
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-outputs
+          path: ./
+
+      - name: Run smoke tests
+        id: validate
+        run: |
+          echo "::group::Post-Apply Smoke Tests"
+
+          if [ -f ".github/scripts/post-apply-validation.sh" ]; then
+            chmod +x .github/scripts/post-apply-validation.sh
+            if ./.github/scripts/post-apply-validation.sh; then
+              echo "result=pass" >> "$GITHUB_OUTPUT"
+              echo "All smoke tests passed"
+            else
+              echo "result=fail" >> "$GITHUB_OUTPUT"
+              echo "::error::Post-apply validation failed"
+              exit 1
+            fi
+          else
+            echo "::warning::post-apply-validation.sh not found, using inline validation"
+
+            # Inline smoke tests
+            VALIDATION_PASSED=true
+
+            # Test 1: Verify resource group exists
+            RG_NAME="telemaco-dev"
+            echo "Checking resource group '${RG_NAME}'..."
+            if az group show --name "$RG_NAME" --output none 2>/dev/null; then
+              echo "  PASS: Resource group '${RG_NAME}' exists"
+            else
+              echo "  FAIL: Resource group '${RG_NAME}' not found"
+              VALIDATION_PASSED=false
+            fi
+
+            # Test 2: Verify VNet exists (if outputs available)
+            if [ -f terraform_outputs.json ]; then
+              VNET_ID=$(jq -r '.vnet_id.value // empty' terraform_outputs.json 2>/dev/null)
+              if [ -n "$VNET_ID" ]; then
+                echo "Checking VNet (ID: ${VNET_ID})..."
+                if az network vnet show --ids "$VNET_ID" --output none 2>/dev/null; then
+                  echo "  PASS: VNet exists"
+                else
+                  echo "  FAIL: VNet not found"
+                  VALIDATION_PASSED=false
+                fi
+              fi
+            fi
+
+            # Test 3: Verify resource group location matches expected
+            RG_LOCATION=$(az group show --name "$RG_NAME" --query location --output tsv 2>/dev/null)
+            echo "Resource group location: ${RG_LOCATION}"
+
+            if [ "$VALIDATION_PASSED" = true ]; then
+              echo "result=pass" >> "$GITHUB_OUTPUT"
+              echo "All inline smoke tests passed"
+            else
+              echo "result=fail" >> "$GITHUB_OUTPUT"
+              echo "::error::One or more smoke tests failed"
+              exit 1
+            fi
+          fi
+
+          echo "::endgroup::"
+
+      - name: Post-apply summary
+        if: always()
+        run: |
+          echo "## Validator Agent: Post-Apply Validation" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Result**: ${{ steps.validate.outputs.result || 'failed' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Post-apply smoke tests verify that deployed resources exist and are accessible." >> "$GITHUB_STEP_SUMMARY"
+
+  # =============================================================================
+  # JOB 9: Documentation Update (Documentation Agent)
+  # =============================================================================
+  documentation-update:
+    name: "Documentation Agent: Update README"
+    runs-on: ubuntu-latest
+    needs: [validator-post-apply]
+    if: needs.validator-post-apply.outputs.validation_result == 'pass'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ github.token }}
+
+      - name: Download terraform outputs
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-outputs
+          path: ./
+
+      - name: Update README with deployment info
+        env:
+          DEPLOY_COMMIT: ${{ github.sha }}
+          DEPLOY_RUN_NUMBER: ${{ github.run_number }}
+          DEPLOY_RUN_ID: ${{ github.run_id }}
+          DEPLOY_SERVER_URL: ${{ github.server_url }}
+          DEPLOY_REPOSITORY: ${{ github.repository }}
+        run: |
+          echo "::group::README Update"
+
+          if [ ! -f terraform_outputs.json ]; then
+            echo "::warning::No terraform outputs found, skipping README update"
+            exit 0
+          fi
+
+          # Extract outputs
+          ENVIRONMENT=$(jq -r '.environment.value // "unknown"' terraform_outputs.json)
+          LOCATION=$(jq -r '.location.value // "unknown"' terraform_outputs.json)
+          RG_NAME=$(jq -r '.resource_group_name.value // "unknown"' terraform_outputs.json)
+          DEPLOY_TIME=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          SHORT_SHA="${DEPLOY_COMMIT:0:7}"
+
+          # Generate deployment status section using heredoc
+          cat > /tmp/deploy_section.md <<DEPLOY_EOF
+          <!-- DEPLOYMENT-STATUS-START -->
+          ## Current Deployment Status
+
+          | Property | Value |
+          |----------|-------|
+          | **Environment** | ${ENVIRONMENT} |
+          | **Region** | ${LOCATION} |
+          | **Resource Group** | ${RG_NAME} |
+          | **Last Deployed** | ${DEPLOY_TIME} |
+          | **Deployed By** | GitHub Actions (commit: \`${SHORT_SHA}\`) |
+          | **Workflow Run** | [#${DEPLOY_RUN_NUMBER}](${DEPLOY_SERVER_URL}/${DEPLOY_REPOSITORY}/actions/runs/${DEPLOY_RUN_ID}) |
+          <!-- DEPLOYMENT-STATUS-END -->
+          DEPLOY_EOF
+
+          # Remove leading whitespace from heredoc
+          sed -i 's/^          //' /tmp/deploy_section.md
+
+          # Update or append to README
+          if [ -f README.md ]; then
+            if grep -q "DEPLOYMENT-STATUS-START" README.md; then
+              # Replace existing section using Python
+              python3 -c "
+          import re
+          with open('README.md', 'r') as f:
+              content = f.read()
+          with open('/tmp/deploy_section.md', 'r') as f:
+              replacement = f.read().strip()
+          pattern = r'<!-- DEPLOYMENT-STATUS-START -->.*?<!-- DEPLOYMENT-STATUS-END -->'
+          content = re.sub(pattern, replacement, content, flags=re.DOTALL)
+          with open('README.md', 'w') as f:
+              f.write(content)
+          "
+              echo "Updated existing deployment status section in README.md"
+            else
+              # Append section
+              echo "" >> README.md
+              cat /tmp/deploy_section.md >> README.md
+              echo "Appended deployment status section to README.md"
+            fi
+          else
+            echo "::warning::README.md not found, skipping update"
+            exit 0
+          fi
+
+          echo "::endgroup::"
+
+      - name: Commit README changes
+        env:
+          DEPLOY_RUN_NUMBER: ${{ github.run_number }}
+          DEPLOY_COMMIT: ${{ github.sha }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet README.md 2>/dev/null; then
+            echo "No changes to README.md"
+          else
+            SHORT_SHA="${DEPLOY_COMMIT:0:7}"
+            git add README.md
+            git commit -m "docs: update deployment status [skip ci] - run #${DEPLOY_RUN_NUMBER} (${SHORT_SHA})"
+            git push
+            echo "README.md updated and pushed"
+          fi
+
+      - name: Documentation summary
+        if: always()
+        run: |
+          echo "## Documentation Agent: README Update" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "README.md updated with latest deployment status." >> "$GITHUB_STEP_SUMMARY"
+
+  # =============================================================================
+  # JOB 10: Final Status (Status Agent)
+  # =============================================================================
+  status-final:
+    name: "Status Agent: Deployment Summary"
+    runs-on: ubuntu-latest
+    needs:
+      - preflight-validation
+      - builder-format-validate
+      - validator-security-scan
+      - builder-plan
+      - validator-plan-review
+      - approval-gate
+      - builder-apply
+      - validator-post-apply
+      - documentation-update
+    if: always()
+    steps:
+      - name: Determine overall status
+        id: status
+        run: |
+          echo "::group::Deployment Status Evaluation"
+
+          # Evaluate each job result
+          PREFLIGHT="${{ needs.preflight-validation.result }}"
+          FORMAT="${{ needs.builder-format-validate.result }}"
+          SECURITY="${{ needs.validator-security-scan.result }}"
+          PLAN="${{ needs.builder-plan.result }}"
+          REVIEW="${{ needs.validator-plan-review.result }}"
+          APPROVAL="${{ needs.approval-gate.result }}"
+          APPLY="${{ needs.builder-apply.result }}"
+          POST_APPLY="${{ needs.validator-post-apply.result }}"
+          DOCS="${{ needs.documentation-update.result }}"
+
+          # Determine overall status
+          if [ "$APPLY" = "success" ] && [ "$POST_APPLY" = "success" ]; then
+            OVERALL="SUCCESS"
+          elif [ "$PLAN" = "success" ] && [ "$APPLY" = "skipped" ]; then
+            # No changes to apply, or still waiting for approval
+            if [ "${{ needs.builder-plan.outputs.has_changes }}" = "false" ]; then
+              OVERALL="NO_CHANGES"
+            else
+              OVERALL="PENDING_APPROVAL"
+            fi
+          else
+            OVERALL="FAILED"
+          fi
+
+          echo "overall=${OVERALL}" >> "$GITHUB_OUTPUT"
+          echo "Overall deployment status: ${OVERALL}"
+
+          echo "::endgroup::"
+
+      - name: Post deployment summary
+        run: |
+          OVERALL="${{ steps.status.outputs.overall }}"
+
+          echo "## Deployment Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Overall Status**: ${OVERALL}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Branch**: ${{ github.ref_name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Commit**: \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Triggered by**: ${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Workflow run**: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Job Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| # | Job | Agent | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|-----|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 1 | Pre-Flight Validation | Pre-Flight Agent | ${{ needs.preflight-validation.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 2 | Format & Validate | Builder Agent | ${{ needs.builder-format-validate.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 3 | Security Scan | Validator Agent | ${{ needs.validator-security-scan.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 4 | Terraform Plan | Builder Agent | ${{ needs.builder-plan.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 5 | Plan Review | Validator Agent | ${{ needs.validator-plan-review.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 6 | Approval Gate | Manual | ${{ needs.approval-gate.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 7 | Terraform Apply | Builder Agent | ${{ needs.builder-apply.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 8 | Post-Apply Validation | Validator Agent | ${{ needs.validator-post-apply.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 9 | Documentation Update | Documentation Agent | ${{ needs.documentation-update.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 10 | Deployment Summary | Status Agent | (this job) |" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # Risk assessment details (if available)
+          RISK_LEVEL="${{ needs.validator-plan-review.outputs.risk_level }}"
+          if [ -n "$RISK_LEVEL" ]; then
+            echo "### Risk Assessment" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Metric | Value |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Risk Level | ${RISK_LEVEL} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Resources Added | ${{ needs.validator-plan-review.outputs.resource_add }} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Resources Changed | ${{ needs.validator-plan-review.outputs.resource_change }} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Resources Destroyed | ${{ needs.validator-plan-review.outputs.resource_destroy }} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Approval Required | ${{ needs.validator-plan-review.outputs.requires_approval }} |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "_Generated by Terraform Deploy workflow at $(date -u '+%Y-%m-%d %H:%M:%S UTC')_" >> "$GITHUB_STEP_SUMMARY"

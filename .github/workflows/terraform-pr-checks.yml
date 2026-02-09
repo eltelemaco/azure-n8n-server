@@ -1,0 +1,709 @@
+# -----------------------------------------------------------------------------
+# terraform-pr-checks.yml - PR Validation Pipeline
+# -----------------------------------------------------------------------------
+# Purpose: Fast feedback loop for pull requests targeting main branch.
+# Validates Terraform formatting, syntax, security compliance, generates
+# infrastructure plan, and posts comprehensive review comments.
+#
+# Agent Team Pattern:
+#   - Status Agent:    status-start, status-comment (PR communication)
+#   - Builder Agent:   builder-format-check, builder-validate, builder-plan
+#   - Validator Agent: validator-security-scan, validator-plan-review
+#
+# Job Dependency Chain:
+#   status-start
+#     -> builder-format-check
+#       -> builder-validate + validator-security-scan (parallel)
+#         -> builder-plan
+#           -> validator-plan-review
+#             -> status-comment
+#
+# Secrets Required:
+#   - HCP_TERRAFORM_TOKEN: API token for HCP Terraform (remote state + plan)
+# -----------------------------------------------------------------------------
+
+name: "Terraform PR Checks"
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "infra/**/*.tf"
+      - "infra/**/*.tfvars"
+      - ".github/workflows/terraform-pr-checks.yml"
+      - ".github/actions/setup-terraform/**"
+
+# Cancel in-progress runs for the same PR to save resources
+concurrency:
+  group: terraform-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  TF_WORKING_DIR: infra/environments/dev
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  # ===========================================================================
+  # Status Agent: Post initial PR comment
+  # ===========================================================================
+  status-start:
+    name: "Status Agent: PR Check Started"
+    runs-on: ubuntu-latest
+    outputs:
+      comment-id: ${{ steps.initial-comment.outputs.comment-id }}
+    steps:
+      - name: Post initial status comment
+        id: initial-comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = [
+              '## Terraform PR Validation',
+              '',
+              '| Stage | Status |',
+              '|-------|--------|',
+              '| Format Check | :hourglass: Pending |',
+              '| Validate | :hourglass: Pending |',
+              '| Security Scan | :hourglass: Pending |',
+              '| Plan | :hourglass: Pending |',
+              '| Plan Review | :hourglass: Pending |',
+              '',
+              ':robot: *Workflow started at ' + new Date().toISOString() + '*',
+              '',
+              '---',
+              '*Powered by the Agent Team Pattern*'
+            ].join('\n');
+
+            const { data: comment } = await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+
+            core.setOutput('comment-id', comment.id);
+
+  # ===========================================================================
+  # Builder Agent: Format Check
+  # ===========================================================================
+  builder-format-check:
+    name: "Builder Agent: Format Check"
+    runs-on: ubuntu-latest
+    needs: [status-start]
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: ./.github/actions/setup-terraform
+        with:
+          hcp-token: ${{ secrets.HCP_TERRAFORM_TOKEN }}
+          working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Check Terraform formatting
+        id: fmt
+        run: |
+          echo "::group::Running terraform fmt -check -recursive"
+          # Run from the infra root to check all modules and environments
+          cd "${{ github.workspace }}/infra"
+          if terraform fmt -check -recursive 2>&1 | tee fmt_output.txt; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            echo "All Terraform files are properly formatted."
+          else
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+            echo ""
+            echo "::error::Terraform formatting check failed. Run 'terraform fmt -recursive' to fix."
+            echo ""
+            echo "Files requiring formatting:"
+            cat fmt_output.txt
+            exit 1
+          fi
+          echo "::endgroup::"
+
+  # ===========================================================================
+  # Builder Agent: Validate Configuration
+  # ===========================================================================
+  builder-validate:
+    name: "Builder Agent: Validate"
+    runs-on: ubuntu-latest
+    needs: [builder-format-check]
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: ./.github/actions/setup-terraform
+        with:
+          hcp-token: ${{ secrets.HCP_TERRAFORM_TOKEN }}
+          working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Validate Terraform configuration
+        id: validate
+        run: |
+          echo "::group::Running terraform validate"
+          if terraform validate -no-color 2>&1 | tee validate_output.txt; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            echo "Terraform configuration is valid."
+          else
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+            echo "::error::Terraform validation failed."
+            cat validate_output.txt
+            exit 1
+          fi
+          echo "::endgroup::"
+
+  # ===========================================================================
+  # Validator Agent: Security Scan (parallel with validate)
+  # ===========================================================================
+  validator-security-scan:
+    name: "Validator Agent: Security Scan"
+    runs-on: ubuntu-latest
+    needs: [builder-format-check]
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+    outputs:
+      tflint-status: ${{ steps.tflint.outputs.status }}
+      checkov-status: ${{ steps.checkov.outputs.status }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: ./.github/actions/setup-terraform
+        with:
+          hcp-token: ${{ secrets.HCP_TERRAFORM_TOKEN }}
+          working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Install tflint
+        run: |
+          curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+          tflint --version
+
+      - name: Run tflint
+        id: tflint
+        continue-on-error: true
+        run: |
+          echo "::group::Running tflint"
+          # Use project tflint config if available, otherwise use defaults
+          TFLINT_CONFIG="${{ github.workspace }}/infra/.tflint.hcl"
+          if [ -f "$TFLINT_CONFIG" ]; then
+            tflint --init --config="$TFLINT_CONFIG"
+            if tflint --config="$TFLINT_CONFIG" --format=compact 2>&1 | tee tflint_output.txt; then
+              echo "status=success" >> "$GITHUB_OUTPUT"
+            else
+              echo "status=warning" >> "$GITHUB_OUTPUT"
+              echo "::warning::tflint found issues. Review the output above."
+            fi
+          else
+            tflint --init
+            if tflint --format=compact 2>&1 | tee tflint_output.txt; then
+              echo "status=success" >> "$GITHUB_OUTPUT"
+            else
+              echo "status=warning" >> "$GITHUB_OUTPUT"
+              echo "::warning::tflint found issues. Review the output above."
+            fi
+          fi
+          echo "::endgroup::"
+
+      - name: Install checkov
+        run: |
+          pip install checkov
+          checkov --version
+
+      - name: Run checkov
+        id: checkov
+        continue-on-error: true
+        run: |
+          echo "::group::Running checkov security scan"
+          CHECKOV_CONFIG="${{ github.workspace }}/infra/.checkov.yaml"
+          SCAN_DIR="${{ github.workspace }}/infra"
+
+          CHECKOV_ARGS="--directory $SCAN_DIR --framework terraform --output cli --output json --output-file-path . --compact"
+
+          if [ -f "$CHECKOV_CONFIG" ]; then
+            CHECKOV_ARGS="$CHECKOV_ARGS --config-file $CHECKOV_CONFIG"
+          fi
+
+          if checkov $CHECKOV_ARGS 2>&1 | tee checkov_output.txt; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=warning" >> "$GITHUB_OUTPUT"
+            echo "::warning::checkov found security issues. Review the output above."
+          fi
+          echo "::endgroup::"
+
+      - name: Upload security scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-scan-results
+          path: |
+            ${{ env.TF_WORKING_DIR }}/tflint_output.txt
+            ${{ env.TF_WORKING_DIR }}/checkov_output.txt
+            ${{ env.TF_WORKING_DIR }}/results_cli.txt
+            ${{ env.TF_WORKING_DIR }}/results_json.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ===========================================================================
+  # Builder Agent: Generate Terraform Plan
+  # ===========================================================================
+  builder-plan:
+    name: "Builder Agent: Plan"
+    runs-on: ubuntu-latest
+    needs: [builder-validate, validator-security-scan]
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+    outputs:
+      plan-exitcode: ${{ steps.plan.outputs.exitcode }}
+      has-changes: ${{ steps.plan.outputs.has-changes }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: ./.github/actions/setup-terraform
+        with:
+          hcp-token: ${{ secrets.HCP_TERRAFORM_TOKEN }}
+          working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Generate Terraform plan
+        id: plan
+        run: |
+          echo "::group::Running terraform plan"
+
+          # Generate binary plan for potential apply
+          set +e
+          terraform plan -out=tfplan.binary -detailed-exitcode -no-color 2>&1 | tee plan_output.txt
+          PLAN_EXIT_CODE=$?
+          set -e
+
+          echo "exitcode=$PLAN_EXIT_CODE" >> "$GITHUB_OUTPUT"
+
+          case $PLAN_EXIT_CODE in
+            0)
+              echo "has-changes=false" >> "$GITHUB_OUTPUT"
+              echo "No changes detected. Infrastructure is up-to-date."
+              ;;
+            1)
+              echo "has-changes=false" >> "$GITHUB_OUTPUT"
+              echo "::error::Terraform plan failed with errors."
+              exit 1
+              ;;
+            2)
+              echo "has-changes=true" >> "$GITHUB_OUTPUT"
+              echo "Changes detected in the plan."
+              ;;
+          esac
+          echo "::endgroup::"
+
+      - name: Convert plan to JSON
+        if: steps.plan.outputs.has-changes == 'true'
+        run: |
+          terraform show -json tfplan.binary > tfplan.json
+          echo "Plan JSON generated successfully."
+
+      - name: Save plan text output
+        run: |
+          if [ -f plan_output.txt ]; then
+            cp plan_output.txt tfplan_text.txt
+          fi
+
+      - name: Upload plan artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: |
+            ${{ env.TF_WORKING_DIR }}/tfplan.binary
+            ${{ env.TF_WORKING_DIR }}/tfplan.json
+            ${{ env.TF_WORKING_DIR }}/tfplan_text.txt
+            ${{ env.TF_WORKING_DIR }}/plan_output.txt
+          if-no-files-found: ignore
+          retention-days: 90
+
+  # ===========================================================================
+  # Validator Agent: Plan Review & Risk Assessment
+  # ===========================================================================
+  validator-plan-review:
+    name: "Validator Agent: Plan Review"
+    runs-on: ubuntu-latest
+    needs: [builder-plan]
+    if: needs.builder-plan.outputs.has-changes == 'true'
+    outputs:
+      risk-level: ${{ steps.review.outputs.risk_level }}
+      resources-add: ${{ steps.review.outputs.add }}
+      resources-change: ${{ steps.review.outputs.change }}
+      resources-destroy: ${{ steps.review.outputs.destroy }}
+      summary: ${{ steps.review.outputs.summary }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download plan artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: plan-artifacts
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Analyze plan and assess risk
+        id: review
+        run: |
+          PLAN_JSON="plan-artifacts/${{ env.TF_WORKING_DIR }}/tfplan.json"
+
+          if [ -f "$PLAN_JSON" ]; then
+            echo "Analyzing plan JSON with parse-plan.py..."
+            SCRIPT="${{ github.workspace }}/.github/scripts/parse-plan.py"
+
+            if [ -f "$SCRIPT" ]; then
+              # Use the project parse-plan script
+              RESULT=$(python "$SCRIPT" "$PLAN_JSON")
+            else
+              # Inline fallback parser if script not yet available
+              RESULT=$(python3 << 'PYEOF'
+          import json
+          import sys
+          import os
+
+          plan_path = os.environ.get('PLAN_JSON_PATH', '')
+          if not plan_path:
+              plan_path = sys.argv[1] if len(sys.argv) > 1 else ''
+
+          try:
+              with open(plan_path, 'r') as f:
+                  plan = json.load(f)
+          except (FileNotFoundError, json.JSONDecodeError) as e:
+              print(json.dumps({
+                  "risk_level": "UNKNOWN",
+                  "requires_approval": False,
+                  "add": 0, "change": 0, "destroy": 0,
+                  "summary": f"Failed to parse plan: {e}",
+                  "destructive_resources": [],
+                  "security_changes": []
+              }))
+              sys.exit(0)
+
+          add = 0
+          change = 0
+          destroy = 0
+          destructive_resources = []
+          security_changes = []
+
+          resource_changes = plan.get("resource_changes", [])
+          for rc in resource_changes:
+              actions = rc.get("change", {}).get("actions", [])
+              resource_addr = rc.get("address", "unknown")
+              resource_type = rc.get("type", "unknown")
+
+              if "create" in actions and "delete" not in actions:
+                  add += 1
+              if "update" in actions:
+                  change += 1
+              if "delete" in actions:
+                  destroy += 1
+                  destructive_resources.append(resource_addr)
+              if "create" in actions and "delete" in actions:
+                  # Replace operation (delete + create)
+                  destructive_resources.append(f"{resource_addr} (replace)")
+
+              # Detect security-relevant changes
+              security_types = [
+                  "azurerm_network_security_group",
+                  "azurerm_network_security_rule",
+                  "azurerm_public_ip",
+                  "azurerm_key_vault",
+                  "azurerm_role_assignment",
+                  "azurerm_key_vault_access_policy"
+              ]
+              if resource_type in security_types and any(a != "no-op" for a in actions):
+                  security_changes.append(resource_addr)
+
+          # Determine risk level
+          if destroy > 0 or len(destructive_resources) > 0:
+              risk_level = "HIGH"
+              requires_approval = True
+          elif change > 0 or len(security_changes) > 0:
+              risk_level = "MEDIUM"
+              requires_approval = True
+          else:
+              risk_level = "LOW"
+              requires_approval = False
+
+          summary_parts = []
+          if add > 0:
+              summary_parts.append(f"{add} to add")
+          if change > 0:
+              summary_parts.append(f"{change} to change")
+          if destroy > 0:
+              summary_parts.append(f"{destroy} to destroy")
+          summary = ", ".join(summary_parts) if summary_parts else "No changes"
+
+          result = {
+              "risk_level": risk_level,
+              "requires_approval": requires_approval,
+              "add": add,
+              "change": change,
+              "destroy": destroy,
+              "summary": summary,
+              "destructive_resources": destructive_resources,
+              "security_changes": security_changes
+          }
+
+          print(json.dumps(result))
+          PYEOF
+            )
+
+            echo "Parse result: $RESULT"
+
+            # Extract values from JSON result
+            RISK_LEVEL=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['risk_level'])")
+            ADD=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['add'])")
+            CHANGE=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['change'])")
+            DESTROY=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['destroy'])")
+            SUMMARY=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['summary'])")
+
+            echo "risk_level=$RISK_LEVEL" >> "$GITHUB_OUTPUT"
+            echo "add=$ADD" >> "$GITHUB_OUTPUT"
+            echo "change=$CHANGE" >> "$GITHUB_OUTPUT"
+            echo "destroy=$DESTROY" >> "$GITHUB_OUTPUT"
+            echo "summary=$SUMMARY" >> "$GITHUB_OUTPUT"
+
+            echo "### Plan Review Summary" >> "$GITHUB_STEP_SUMMARY"
+            echo "- **Risk Level**: $RISK_LEVEL" >> "$GITHUB_STEP_SUMMARY"
+            echo "- **Resources**: $SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::Plan JSON not found. Skipping detailed analysis."
+            echo "risk_level=UNKNOWN" >> "$GITHUB_OUTPUT"
+            echo "add=0" >> "$GITHUB_OUTPUT"
+            echo "change=0" >> "$GITHUB_OUTPUT"
+            echo "destroy=0" >> "$GITHUB_OUTPUT"
+            echo "summary=Plan JSON not available" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          PLAN_JSON_PATH: plan-artifacts/${{ env.TF_WORKING_DIR }}/tfplan.json
+
+  # ===========================================================================
+  # Status Agent: Post Comprehensive PR Comment
+  # ===========================================================================
+  status-comment:
+    name: "Status Agent: PR Comment"
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - status-start
+      - builder-format-check
+      - builder-validate
+      - validator-security-scan
+      - builder-plan
+      - validator-plan-review
+    steps:
+      - name: Download plan artifacts
+        if: needs.builder-plan.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: plan-artifacts
+        continue-on-error: true
+
+      - name: Post comprehensive PR comment
+        uses: actions/github-script@v7
+        env:
+          FORMAT_RESULT: ${{ needs.builder-format-check.result }}
+          VALIDATE_RESULT: ${{ needs.builder-validate.result }}
+          SECURITY_RESULT: ${{ needs.validator-security-scan.result }}
+          PLAN_RESULT: ${{ needs.builder-plan.result }}
+          REVIEW_RESULT: ${{ needs.validator-plan-review.result }}
+          HAS_CHANGES: ${{ needs.builder-plan.outputs.has-changes }}
+          RISK_LEVEL: ${{ needs.validator-plan-review.outputs.risk-level }}
+          RESOURCES_ADD: ${{ needs.validator-plan-review.outputs.resources-add }}
+          RESOURCES_CHANGE: ${{ needs.validator-plan-review.outputs.resources-change }}
+          RESOURCES_DESTROY: ${{ needs.validator-plan-review.outputs.resources-destroy }}
+          PLAN_SUMMARY: ${{ needs.validator-plan-review.outputs.summary }}
+          TFLINT_STATUS: ${{ needs.validator-security-scan.outputs.tflint-status }}
+          CHECKOV_STATUS: ${{ needs.validator-security-scan.outputs.checkov-status }}
+          COMMENT_ID: ${{ needs.status-start.outputs.comment-id }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            // Helper: map job result to status emoji
+            function statusEmoji(result) {
+              switch (result) {
+                case 'success': return ':white_check_mark: Passed';
+                case 'failure': return ':x: Failed';
+                case 'cancelled': return ':stop_sign: Cancelled';
+                case 'skipped': return ':fast_forward: Skipped';
+                default: return ':grey_question: Unknown';
+              }
+            }
+
+            // Helper: risk level badge
+            function riskBadge(level) {
+              switch (level) {
+                case 'LOW': return ':green_circle: LOW';
+                case 'MEDIUM': return ':yellow_circle: MEDIUM';
+                case 'HIGH': return ':red_circle: HIGH';
+                default: return ':white_circle: UNKNOWN';
+              }
+            }
+
+            const formatResult = process.env.FORMAT_RESULT;
+            const validateResult = process.env.VALIDATE_RESULT;
+            const securityResult = process.env.SECURITY_RESULT;
+            const planResult = process.env.PLAN_RESULT;
+            const reviewResult = process.env.REVIEW_RESULT;
+            const hasChanges = process.env.HAS_CHANGES;
+            const riskLevel = process.env.RISK_LEVEL;
+            const add = process.env.RESOURCES_ADD || '0';
+            const change = process.env.RESOURCES_CHANGE || '0';
+            const destroy = process.env.RESOURCES_DESTROY || '0';
+            const planSummary = process.env.PLAN_SUMMARY || 'N/A';
+
+            // Determine overall status
+            const allResults = [formatResult, validateResult, planResult];
+            const overallFailed = allResults.includes('failure');
+            const overallIcon = overallFailed ? ':x:' : ':white_check_mark:';
+            const overallText = overallFailed ? 'FAILED' : 'PASSED';
+
+            // Build status table
+            let body = [
+              `## ${overallIcon} Terraform PR Validation - ${overallText}`,
+              '',
+              '### Stage Results',
+              '',
+              '| Stage | Agent | Status |',
+              '|-------|-------|--------|',
+              `| Format Check | Builder | ${statusEmoji(formatResult)} |`,
+              `| Validate | Builder | ${statusEmoji(validateResult)} |`,
+              `| Security Scan | Validator | ${statusEmoji(securityResult)} |`,
+              `| Plan | Builder | ${statusEmoji(planResult)} |`,
+              `| Plan Review | Validator | ${statusEmoji(reviewResult)} |`,
+              ''
+            ];
+
+            // Add plan summary if changes detected
+            if (hasChanges === 'true' && planResult === 'success') {
+              body.push('### Plan Summary');
+              body.push('');
+              body.push(`**Risk Level**: ${riskBadge(riskLevel)}`);
+              body.push('');
+              body.push('| Action | Count |');
+              body.push('|--------|-------|');
+              body.push(`| :heavy_plus_sign: Add | ${add} |`);
+              body.push(`| :pencil2: Change | ${change} |`);
+              body.push(`| :heavy_minus_sign: Destroy | ${destroy} |`);
+              body.push('');
+            } else if (hasChanges === 'false' && planResult === 'success') {
+              body.push('### Plan Summary');
+              body.push('');
+              body.push(':white_check_mark: **No infrastructure changes detected.** The current state matches the configuration.');
+              body.push('');
+            }
+
+            // Add plan diff in collapsible section
+            if (planResult === 'success') {
+              let planText = '';
+              const planPaths = [
+                'plan-artifacts/infra/environments/dev/tfplan_text.txt',
+                'plan-artifacts/infra/environments/dev/plan_output.txt'
+              ];
+
+              for (const p of planPaths) {
+                try {
+                  planText = fs.readFileSync(p, 'utf8');
+                  if (planText) break;
+                } catch (e) {
+                  // File not found, try next
+                }
+              }
+
+              if (planText) {
+                // Truncate very long plans to stay within GitHub comment limits
+                const maxLen = 60000;
+                if (planText.length > maxLen) {
+                  planText = planText.substring(0, maxLen) + '\n\n... (truncated, see full plan in artifacts)';
+                }
+
+                body.push('<details>');
+                body.push('<summary>View Plan Diff</summary>');
+                body.push('');
+                body.push('```diff');
+                body.push(planText);
+                body.push('```');
+                body.push('');
+                body.push('</details>');
+                body.push('');
+              }
+            }
+
+            // Security scan details
+            const tflintStatus = process.env.TFLINT_STATUS || 'unknown';
+            const checkovStatus = process.env.CHECKOV_STATUS || 'unknown';
+
+            body.push('<details>');
+            body.push('<summary>Security Scan Details</summary>');
+            body.push('');
+            body.push(`- **tflint**: ${tflintStatus === 'success' ? ':white_check_mark: Passed' : ':warning: Issues found'}`);
+            body.push(`- **checkov**: ${checkovStatus === 'success' ? ':white_check_mark: Passed' : ':warning: Issues found'}`);
+            body.push('');
+            body.push('See the [Security Scan artifacts](../actions) for detailed results.');
+            body.push('');
+            body.push('</details>');
+            body.push('');
+
+            // Footer
+            body.push('---');
+            body.push(`*Completed at ${new Date().toISOString()} | [View Workflow Run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})*`);
+            body.push('');
+            body.push('*Powered by the Agent Team Pattern :robot:*');
+
+            const commentBody = body.join('\n');
+
+            // Update existing comment or create new one
+            const commentId = process.env.COMMENT_ID;
+            if (commentId) {
+              try {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: parseInt(commentId),
+                  body: commentBody
+                });
+                core.info(`Updated PR comment ${commentId}`);
+              } catch (e) {
+                core.warning(`Failed to update comment ${commentId}: ${e.message}. Creating new comment.`);
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  body: commentBody
+                });
+              }
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+            }

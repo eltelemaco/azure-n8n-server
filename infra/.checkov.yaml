@@ -1,0 +1,175 @@
+# -----------------------------------------------------------------------------
+# .checkov.yaml - Checkov Security Scanning Configuration
+# -----------------------------------------------------------------------------
+# Purpose: Configuration for Checkov used by the validator-security-scan agent
+# in the GitHub Actions CI/CD pipeline. Scans Terraform code for security
+# misconfigurations, compliance violations, and Azure best-practice deviations.
+#
+# This configuration is referenced from:
+#   - .github/workflows/terraform-pr-checks.yml (validator-security-scan job)
+#   - .github/workflows/terraform-deploy.yml (validator-security-scan job)
+#
+# Usage:
+#   checkov --config-file infra/.checkov.yaml -d infra/
+#
+# Severity thresholds (enforced by CI pipeline logic):
+#   CRITICAL - Fail the build immediately
+#   HIGH     - Warn (reported in PR comment, does not block merge in dev)
+#   MEDIUM   - Informational only
+#   LOW      - Informational only
+#
+# Documentation: https://www.checkov.io/2.Basics/CLI%20Command%20Reference.html
+# -----------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Framework selection
+# ---------------------------------------------------------------------------
+# Only scan Terraform and Azure-specific frameworks.
+# Excludes Kubernetes, CloudFormation, Dockerfile, etc. that are not relevant.
+framework:
+  - terraform
+
+# ---------------------------------------------------------------------------
+# Output configuration
+# ---------------------------------------------------------------------------
+# Compact output keeps CI logs readable. Only failed checks are shown to
+# reduce noise and focus reviewer attention on actionable findings.
+compact: true
+quiet: true
+
+# ---------------------------------------------------------------------------
+# Soft-fail mode (dev environment)
+# ---------------------------------------------------------------------------
+# In dev, checkov exits 0 even when checks fail. This prevents blocking
+# development iteration on non-critical findings. The CI pipeline parses
+# the JSON output separately to enforce severity-based thresholds:
+#   CRITICAL -> fail build
+#   HIGH     -> warn in PR comment
+#   MEDIUM   -> info in PR comment
+#   LOW      -> info in PR comment
+#
+# For production environments, set soft-fail to false so that any failed
+# check causes a non-zero exit code.
+soft-fail: true
+
+# ---------------------------------------------------------------------------
+# Output format
+# ---------------------------------------------------------------------------
+# JSON output for programmatic parsing by the CI pipeline.
+# The workflow also requests CLI output for human-readable PR comments.
+output:
+  - cli
+  - json
+
+# ---------------------------------------------------------------------------
+# Directory and file configuration
+# ---------------------------------------------------------------------------
+# Scan the entire infra/ tree. The CI workflow passes -d explicitly but
+# this serves as the default when running locally.
+directory:
+  - "."
+
+# Download external modules for full analysis.
+download-external-modules: true
+
+# ---------------------------------------------------------------------------
+# Skipped checks
+# ---------------------------------------------------------------------------
+# Checks skipped because they are not applicable to the dev environment or
+# conflict with the project's architecture decisions. Each skip includes a
+# justification comment.
+#
+# Check reference: https://www.checkov.io/5.Policy%20Index/terraform.html
+skip-check:
+  # -------------------------------------------------------------------------
+  # Azure Bastion / Public IP exceptions
+  # -------------------------------------------------------------------------
+  # CKV_AZURE_9: Ensure that RDP access is restricted from the internet
+  # Justification: Azure Bastion handles RDP access securely; the Bastion
+  # host itself requires a public IP by design. NSG rules restrict all other
+  # public RDP access.
+  - "CKV_AZURE_9"
+
+  # -------------------------------------------------------------------------
+  # Dev environment relaxations
+  # -------------------------------------------------------------------------
+  # CKV_AZURE_35: Ensure storage account default network access is denied
+  # Justification: Dev storage accounts use "Allow" for developer access.
+  # Production environments override this with "Deny" + private endpoints.
+  - "CKV_AZURE_35"
+
+  # CKV_AZURE_33: Ensure storage logging is enabled for Queue service
+  # Justification: Queue service is not used in the current architecture.
+  # Re-enable when queue-based workloads are introduced.
+  - "CKV_AZURE_33"
+
+  # CKV_AZURE_36: Ensure storage account secure transfer is required
+  # Justification: Not applicable - no storage accounts deployed yet.
+  # This check will be enforced once storage modules are implemented.
+  - "CKV_AZURE_36"
+
+  # -------------------------------------------------------------------------
+  # Terraform backend / state exceptions
+  # -------------------------------------------------------------------------
+  # CKV_TF_1: Ensure Terraform module sources use a commit hash
+  # Justification: Local module sources (../../modules/*) do not use
+  # commit hashes. Registry modules will use version constraints instead.
+  - "CKV_TF_1"
+
+  # CKV_TF_2: Ensure Terraform module sources use a tag with a version
+  # Justification: Same as above - local modules are version-controlled
+  # alongside the root configuration in the same repository.
+  - "CKV_TF_2"
+
+  # -------------------------------------------------------------------------
+  # Resource group / subscription-level checks
+  # -------------------------------------------------------------------------
+  # CKV2_AZURE_1: Ensure storage account uses customer-managed key
+  # Justification: Dev environment uses Microsoft-managed keys for
+  # simplicity. Customer-managed keys enforced in production only.
+  - "CKV2_AZURE_1"
+
+  # CKV2_AZURE_18: Ensure that Storage Accounts use customer-managed keys
+  # Justification: Duplicate of CKV2_AZURE_1 for newer check format.
+  - "CKV2_AZURE_18"
+
+  # CKV2_AZURE_33: Ensure storage account is configured with private endpoint
+  # Justification: Private endpoints add cost and complexity not warranted
+  # in dev. Enforced in staging and production environments.
+  - "CKV2_AZURE_33"
+
+  # -------------------------------------------------------------------------
+  # Network security relaxations (dev only)
+  # -------------------------------------------------------------------------
+  # CKV2_AZURE_31: Ensure VNET has at least 2 DNS servers configured
+  # Justification: Dev VNet uses Azure-provided DNS. Custom DNS servers
+  # are configured in production with hub DNS forwarders.
+  - "CKV2_AZURE_31"
+
+# ---------------------------------------------------------------------------
+# Check inclusion (explicit allow-list)
+# ---------------------------------------------------------------------------
+# When check list is empty, all non-skipped checks run. Uncomment and
+# populate to restrict scanning to a specific set of checks.
+# check:
+#   - "CKV_AZURE_1"
+
+# ---------------------------------------------------------------------------
+# External checks
+# ---------------------------------------------------------------------------
+# Path to custom check definitions. Uncomment when custom policies are
+# added for organization-specific compliance requirements.
+# external-checks-dir:
+#   - "infra/policies/checkov"
+
+# ---------------------------------------------------------------------------
+# Evaluation thresholds
+# ---------------------------------------------------------------------------
+# These settings control the minimum severity level that checkov reports.
+# The CI pipeline further filters results by severity for pass/fail logic.
+#
+# hard-fail-on: Controls which severities cause a non-zero exit code
+# when soft-fail is false. In dev (soft-fail: true), this has no effect
+# but documents the intended production behavior.
+hard-fail-on:
+  - "CRITICAL"
