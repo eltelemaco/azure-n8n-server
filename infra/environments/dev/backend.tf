@@ -19,18 +19,18 @@
 # Next steps:
 #   - Replace "your-org-name" with your HCP Terraform organization
 #   - Create the workspace in HCP Terraform before running terraform init
-#   - Configure workspace variable sets for Azure credentials
-#     (ARM_CLIENT_ID, ARM_CLIENT_SECRET, ARM_TENANT_ID, ARM_SUBSCRIPTION_ID)
+#   - Configure workspace variables for Azure OIDC credentials
+#     (ARM_USE_OIDC, ARM_CLIENT_ID, ARM_TENANT_ID, ARM_SUBSCRIPTION_ID)
 # -----------------------------------------------------------------------------
 
 terraform {
   cloud {
     # TODO: Replace with your HCP Terraform organization name
-    organization = "your-org-name"
+    organization = "TelemacoInfraLabs"
 
     workspaces {
       # Workspace naming convention: <project>-<environment>
-      name = "azure-landing-zone-dev"
+      name = "azure-n8n-server"
     }
   }
 }

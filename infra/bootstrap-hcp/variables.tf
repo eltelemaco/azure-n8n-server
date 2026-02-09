@@ -4,45 +4,10 @@ variable "tfc_organization" {
   default     = "TelemacoInfraLabs"
 }
 
-variable "tfc_project_name" {
-  description = "Optional HCP Terraform project name."
-  type        = string
-  default     = "azure-hcp-project"
-}
-
 variable "tfc_workspace_name" {
   description = "HCP Terraform workspace name (e.g., n8n-prod-usw1)."
   type        = string
   default     = "azure-n8n-server"
-}
-
-variable "tfc_working_directory" {
-  description = "Working directory for the HCP Terraform workspace."
-  type        = string
-  default     = "infra/environments/dev"
-}
-
-variable "vcs_repo_identifier" {
-  description = "Optional VCS repo identifier (org/name) to connect workspace."
-  type        = string
-  default     = null
-}
-
-variable "vcs_repo_branch" {
-  description = "Optional VCS branch name for the workspace."
-  type        = string
-  default     = null
-}
-
-variable "vcs_oauth_token_id" {
-  description = "Optional VCS OAuth token ID (required if vcs_repo_identifier is set)."
-  type        = string
-  default     = null
-
-  validation {
-    condition     = var.vcs_repo_identifier == null || var.vcs_oauth_token_id != null
-    error_message = "vcs_oauth_token_id is required when vcs_repo_identifier is set."
-  }
 }
 
 variable "location" {
@@ -139,26 +104,26 @@ variable "extra_tags" {
   default     = {}
 }
 
-variable "azure_github_app_id" {
-  description = "Azure GitHub App ID for integrations."
+variable "arm_tenant_id" {
+  description = "Azure tenant ID for provider auth."
   type        = string
   sensitive   = true
 }
 
-variable "azure_hcp_app_id" {
-  description = "Azure HCP App ID for integrations."
+variable "arm_subscription_id" {
+  description = "Azure subscription ID for provider auth."
   type        = string
   sensitive   = true
 }
 
-variable "azure_tenant_id" {
-  description = "Azure tenant ID for provider auth and integrations."
-  type        = string
-  sensitive   = true
+variable "tfc_azure_provider_auth" {
+  description = "Enable HCP Terraform dynamic provider credentials for Azure."
+  type        = bool
+  default     = true
 }
 
-variable "azure_subscription_id" {
-  description = "Azure subscription ID for provider auth and billing."
+variable "tfc_azure_run_client_id" {
+  description = "Azure app registration client ID used for OIDC runs."
   type        = string
   sensitive   = true
 }

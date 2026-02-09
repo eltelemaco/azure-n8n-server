@@ -91,3 +91,33 @@ output "location" {
   description = "The Azure region for this deployment"
   value       = var.location
 }
+
+output "tenant_id" {
+  description = "Azure tenant ID for the current credentials"
+  value       = data.azurerm_client_config.current.tenant_id
+}
+
+output "subscription_id" {
+  description = "Azure subscription ID for the current credentials"
+  value       = data.azurerm_client_config.current.subscription_id
+}
+
+output "resource_group_name" {
+  description = "Target resource group name"
+  value       = data.azurerm_resource_group.target.name
+}
+
+output "resource_group_id" {
+  description = "Target resource group ID"
+  value       = data.azurerm_resource_group.target.id
+}
+
+output "vnet_id" {
+  description = "Target virtual network ID"
+  value       = azurerm_virtual_network.main.id
+}
+
+output "subnet_ids" {
+  description = "Map of subnet names to IDs"
+  value       = { for name, subnet in data.azurerm_subnet.target : name => subnet.id }
+}

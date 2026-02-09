@@ -35,6 +35,32 @@ locals {
   }
 }
 
+provider "azurerm" {
+  features {}
+  use_oidc = true
+}
+
+data "azurerm_client_config" "current" {}
+
+data "azurerm_resource_group" "target" {
+  name = var.resource_group_name
+}
+
+resource "azurerm_virtual_network" "main" {
+  name                = var.vnet_name
+  address_space       = var.hub_vnet_address_space
+  location            = data.azurerm_resource_group.target.location
+  resource_group_name = data.azurerm_resource_group.target.name
+  tags                = local.common_tags
+}
+
+data "azurerm_subnet" "target" {
+  for_each             = toset(var.subnet_names)
+  name                 = each.value
+  virtual_network_name = azurerm_virtual_network.main.name
+  resource_group_name  = data.azurerm_resource_group.target.name
+}
+
 # --- Resource Group ----------------------------------------------------------
 # Primary resource group for the dev landing zone
 # Naming convention: rg-<environment>-<location>-<name>

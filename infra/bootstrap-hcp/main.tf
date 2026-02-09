@@ -10,27 +10,9 @@ terraform {
 
 provider "tfe" {}
 
-resource "tfe_project" "this" {
-  count        = var.tfc_project_name == null ? 0 : 1
-  name         = var.tfc_project_name
+data "tfe_workspace" "this" {
+  name         = var.tfc_workspace_name
   organization = var.tfc_organization
-}
-
-resource "tfe_workspace" "this" {
-  name              = var.tfc_workspace_name
-  organization      = var.tfc_organization
-  project_id        = var.tfc_project_name == null ? null : tfe_project.this[0].id
-  working_directory = var.tfc_working_directory
-  auto_apply        = false
-
-  dynamic "vcs_repo" {
-    for_each = var.vcs_repo_identifier == null ? [] : [var.vcs_repo_identifier]
-    content {
-      identifier     = vcs_repo.value
-      branch         = var.vcs_repo_branch
-      oauth_token_id = var.vcs_oauth_token_id
-    }
-  }
 }
 
 locals {
@@ -108,20 +90,20 @@ locals {
   }
 
   env_vars = {
-    AZURE_GITHUB_APP_ID = {
-      value     = var.azure_github_app_id
+    ARM_TENANT_ID = {
+      value     = var.arm_tenant_id
       sensitive = true
     }
-    AZURE_HCP_APP_ID = {
-      value     = var.azure_hcp_app_id
+    ARM_SUBSCRIPTION_ID = {
+      value     = var.arm_subscription_id
       sensitive = true
     }
-    AZURE_TENANT_ID = {
-      value     = var.azure_tenant_id
-      sensitive = true
+    TFC_AZURE_PROVIDER_AUTH = {
+      value     = tostring(var.tfc_azure_provider_auth)
+      sensitive = false
     }
-    AZURE_SUBSCRIPTION_ID = {
-      value     = var.azure_subscription_id
+    TFC_AZURE_RUN_CLIENT_ID = {
+      value     = var.tfc_azure_run_client_id
       sensitive = true
     }
   }
@@ -139,7 +121,7 @@ locals {
 
 resource "tfe_variable" "terraform" {
   for_each     = nonsensitive(local.terraform_vars_filtered)
-  workspace_id = tfe_workspace.this.id
+  workspace_id = data.tfe_workspace.this.id
   key          = each.key
   value        = each.value.value
   category     = "terraform"
@@ -149,7 +131,7 @@ resource "tfe_variable" "terraform" {
 
 resource "tfe_variable" "env" {
   for_each     = nonsensitive(local.env_vars_filtered)
-  workspace_id = tfe_workspace.this.id
+  workspace_id = data.tfe_workspace.this.id
   key          = each.key
   value        = each.value.value
   category     = "env"

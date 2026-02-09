@@ -123,3 +123,23 @@ variable "extra_tags" {
   type        = map(string)
   default     = {}
 }
+
+# --- Existing Azure Resources for Data Lookups ------------------------------
+
+variable "resource_group_name" {
+  description = "Existing resource group name used for data lookups."
+  type        = string
+  default     = "telemaco-dev"
+}
+
+variable "vnet_name" {
+  description = "Existing virtual network name used for data lookups."
+  type        = string
+  default     = "value"
+}
+
+variable "subnet_names" {
+  description = "Existing subnet names to look up within the virtual network."
+  type        = list(string)
+  default     = []
+}

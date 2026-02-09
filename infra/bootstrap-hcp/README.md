@@ -10,22 +10,25 @@ landing zone stack. This directory uses local state.
 
 ## Usage
 
-1) Initialize and apply:`
+1) Initialize and apply:
 
-```hcl
 - `terraform init`
 - `terraform apply`
-```
 
 2) Provide required variables via `-var` or `TF_VAR_` environment variables:
 
-```hcl
-- `tfc_organization`, `tfc_workspace_name`, `tfc_working_directory`
+- `tfc_organization`, `tfc_workspace_name`
 - `location`, `project_name`, `owner`, `cost_center`
-- Secrets: `azure_github_app_id`, `azure_hcp_app_id`, `azure_tenant_id`, `azure_subscription_id`
-```
+- Secrets: `arm_subscription_id`, `arm_tenant_id`, `tfc_azure_run_client_id`
 
 ## Notes
 
 - Secrets are marked sensitive and are not stored in the repo.
-- If using VCS-driven runs, set `vcs_repo_identifier` and `vcs_oauth_token_id`.
+- This module assumes the HCP Terraform project and workspace already exist.
+- HCP workspace environment variables include `ARM_SUBSCRIPTION_ID`,
+    `ARM_TENANT_ID`, `TFC_AZURE_PROVIDER_AUTH`, and `TFC_AZURE_RUN_CLIENT_ID`.
+- For federated credentials in Entra ID, create two entries (plan/apply) with
+    subjects:
+    - `organization:TelemacoInfraLabs:project:azure-hcp-project:workspace:azure-n8n-server:run_phase:plan`
+    - `organization:TelemacoInfraLabs:project:azure-hcp-project:workspace:azure-n8n-server:run_phase:apply`
+    Use the issuer URL exactly as provided by HCP Terraform (no trailing slash).
