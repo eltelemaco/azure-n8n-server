@@ -1,0 +1,93 @@
+# -----------------------------------------------------------------------------
+# terraform.tfvars.example - Variable Values Template
+# -----------------------------------------------------------------------------
+# Purpose: Template file showing all configurable variables for the Azure
+# Landing Zone project. Copy this file to terraform.tfvars and fill in
+# your environment-specific values.
+#
+# Usage:
+#   cp terraform.tfvars.example terraform.tfvars
+#   # Edit terraform.tfvars with your values
+#
+# IMPORTANT: Never commit terraform.tfvars to version control as it may
+# contain sensitive values. The .gitignore file excludes it by default.
+#
+# For HCP Terraform, configure variables in the workspace UI or via
+# variable sets for sensitive values like credentials.
+# -----------------------------------------------------------------------------
+
+# --- General Configuration ---------------------------------------------------
+
+# The environment name (dev, staging, production)
+# Used in resource naming and tagging
+environment = "dev"
+
+# Primary Azure region for resource deployment
+# See: https://azure.microsoft.com/en-us/explore/global-infrastructure/geographies/
+location = "eastus"
+
+# Project name used in resource naming and tagging
+project_name = "azure-landing-zone"
+
+# Resource owner for tagging and accountability
+owner = "team-infrastructure"
+
+# Cost center for billing allocation
+cost_center = "IT-001"
+
+# --- Networking Configuration ------------------------------------------------
+
+# Address space for the hub virtual network (CIDR notation)
+hub_vnet_address_space = ["10.0.0.0/16"]
+
+# Address space for the spoke virtual network (CIDR notation)
+spoke_vnet_address_space = ["10.1.0.0/16"]
+
+# Subnet address prefixes
+# web_subnet_prefix  = "10.1.1.0/24"
+# app_subnet_prefix  = "10.1.2.0/24"
+# data_subnet_prefix = "10.1.3.0/24"
+# mgmt_subnet_prefix = "10.0.1.0/24"
+
+# --- Compute Configuration --------------------------------------------------
+
+# Virtual machine size (SKU)
+# See: https://learn.microsoft.com/en-us/azure/virtual-machines/sizes
+vm_size = "Standard_D2s_v3"
+
+# Administrator username for the VM (do NOT use 'admin' or 'administrator')
+admin_username = "azureadmin"
+
+# Number of VM instances to deploy
+vm_instance_count = 1
+
+# OS image configuration
+# vm_image_publisher = "Canonical"
+# vm_image_offer     = "0001-com-ubuntu-server-jammy"
+# vm_image_sku       = "22_04-lts-gen2"
+
+# --- Security Configuration -------------------------------------------------
+
+# Enable Azure Bastion for secure VM access (recommended: true)
+enable_bastion = true
+
+# Enable Azure Key Vault for secrets management
+enable_key_vault = true
+
+# Enable Azure Monitor and Log Analytics
+enable_monitoring = true
+
+# --- Governance Configuration ------------------------------------------------
+
+# Enable Azure Policy assignments for compliance
+enable_policy_assignments = true
+
+# Azure Policy initiative (e.g., "CIS", "NIST", "Azure Security Benchmark")
+# compliance_framework = "Azure Security Benchmark"
+
+# --- Tags --------------------------------------------------------------------
+# Additional custom tags applied to all resources (merged with common tags)
+# extra_tags = {
+#   department = "Engineering"
+#   team       = "Platform"
+# }

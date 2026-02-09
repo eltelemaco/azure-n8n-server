@@ -1,0 +1,42 @@
+# -----------------------------------------------------------------------------
+# terraform.tfvars.example - Staging Environment Variable Values Template
+# -----------------------------------------------------------------------------
+# Purpose: Template for staging environment variable values.
+# Staging mirrors production topology with potentially reduced capacity.
+#
+# Usage:
+#   cp terraform.tfvars.example terraform.tfvars
+#   # Edit terraform.tfvars with your staging-specific values
+#
+# IMPORTANT: Never commit terraform.tfvars to version control.
+# For HCP Terraform, configure variables in the workspace UI.
+# -----------------------------------------------------------------------------
+
+# --- General Configuration ---------------------------------------------------
+location     = "eastus"
+project_name = "azure-landing-zone"
+owner        = "team-infrastructure"
+cost_center  = "IT-001"
+
+# --- Networking (non-overlapping with dev and production) --------------------
+hub_vnet_address_space   = ["10.2.0.0/16"]
+spoke_vnet_address_space = ["10.3.0.0/16"]
+
+# --- Compute (mirrors production with reduced capacity) ----------------------
+vm_size           = "Standard_D2s_v3"
+admin_username    = "azureadmin"
+vm_instance_count = 2
+
+# --- Security ----------------------------------------------------------------
+enable_bastion    = true
+enable_key_vault  = true
+enable_monitoring = true
+
+# --- Governance --------------------------------------------------------------
+enable_policy_assignments = true
+
+# --- Additional Tags ---------------------------------------------------------
+# extra_tags = {
+#   department = "Engineering"
+#   team       = "Platform"
+# }

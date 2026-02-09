@@ -1,0 +1,46 @@
+# -----------------------------------------------------------------------------
+# terraform.tfvars.example - Production Environment Variable Values Template
+# -----------------------------------------------------------------------------
+# Purpose: Template for production environment variable values.
+# Production uses larger VM sizes, higher instance counts, and mandatory
+# security features for high availability and compliance.
+#
+# Usage:
+#   cp terraform.tfvars.example terraform.tfvars
+#   # Edit terraform.tfvars with your production-specific values
+#
+# IMPORTANT: Never commit terraform.tfvars to version control.
+# For HCP Terraform, configure ALL production variables in the workspace UI
+# with appropriate sensitivity markings.
+# -----------------------------------------------------------------------------
+
+# --- General Configuration ---------------------------------------------------
+location     = "eastus"
+project_name = "azure-landing-zone"
+owner        = "team-infrastructure"
+cost_center  = "IT-001"
+
+# --- Networking (non-overlapping with dev and staging) -----------------------
+hub_vnet_address_space   = ["10.4.0.0/16"]
+spoke_vnet_address_space = ["10.5.0.0/16"]
+
+# --- Compute (production-grade sizing with HA) ------------------------------
+vm_size           = "Standard_D4s_v3"
+admin_username    = "azureadmin"
+vm_instance_count = 3
+
+# --- Security (all mandatory in production) ----------------------------------
+enable_bastion    = true
+enable_key_vault  = true
+enable_monitoring = true
+
+# --- Governance (mandatory in production) ------------------------------------
+enable_policy_assignments = true
+
+# --- Additional Tags ---------------------------------------------------------
+# extra_tags = {
+#   department    = "Engineering"
+#   team          = "Platform"
+#   compliance    = "SOC2"
+#   data_class    = "confidential"
+# }

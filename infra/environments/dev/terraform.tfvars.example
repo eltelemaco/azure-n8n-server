@@ -1,0 +1,41 @@
+# -----------------------------------------------------------------------------
+# terraform.tfvars.example - Dev Environment Variable Values Template
+# -----------------------------------------------------------------------------
+# Purpose: Template for dev environment variable values.
+#
+# Usage:
+#   cp terraform.tfvars.example terraform.tfvars
+#   # Edit terraform.tfvars with your dev-specific values
+#
+# IMPORTANT: Never commit terraform.tfvars to version control.
+# For HCP Terraform, configure variables in the workspace UI.
+# -----------------------------------------------------------------------------
+
+# --- General Configuration ---------------------------------------------------
+location     = "eastus"
+project_name = "azure-landing-zone"
+owner        = "team-infrastructure"
+cost_center  = "IT-001"
+
+# --- Networking --------------------------------------------------------------
+hub_vnet_address_space   = ["10.0.0.0/16"]
+spoke_vnet_address_space = ["10.1.0.0/16"]
+
+# --- Compute ----------------------------------------------------------------
+vm_size           = "Standard_D2s_v3"
+admin_username    = "azureadmin"
+vm_instance_count = 1
+
+# --- Security ----------------------------------------------------------------
+enable_bastion    = true
+enable_key_vault  = true
+enable_monitoring = true
+
+# --- Governance --------------------------------------------------------------
+enable_policy_assignments = true
+
+# --- Additional Tags ---------------------------------------------------------
+# extra_tags = {
+#   department = "Engineering"
+#   team       = "Platform"
+# }
