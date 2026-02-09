@@ -494,11 +494,11 @@ The following repository secrets must be configured under **Settings > Secrets a
 | Secret | Purpose | How to Obtain |
 |--------|---------|---------------|
 | `HCP_TERRAFORM_TOKEN` | Authenticates with HCP Terraform for remote state, plan, and apply | Generate at [HCP Terraform > User Settings > Tokens](https://app.terraform.io/app/settings/tokens). Use a **team token** for CI/CD. |
-| `AZURE_CLIENT_ID` | Azure AD application (service principal) client ID for OIDC authentication | From the app registration in Azure AD |
-| `AZURE_TENANT_ID` | Azure AD tenant ID | From Azure AD > Properties |
-| `AZURE_SUBSCRIPTION_ID` | Target Azure subscription ID | From the Azure Portal subscriptions page |
+| `ARM_CLIENT_ID` | Azure AD application (service principal) client ID for OIDC authentication | From the app registration in Azure AD |
+| `ARM_TENANT_ID` | Azure AD tenant ID | From Azure AD > Properties |
+| `ARM_SUBSCRIPTION_ID` | Target Azure subscription ID | From the Azure Portal subscriptions page |
 
-> **Note:** Azure authentication uses OpenID Connect (OIDC) federated credentials -- no client secret is stored in GitHub. The `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID` secrets are used with `azure/login@v2` and the `id-token: write` permission.
+> **Note:** Azure authentication uses OpenID Connect (OIDC) federated credentials -- no client secret is stored in GitHub. The `ARM_CLIENT_ID`, `ARM_TENANT_ID`, and `ARM_SUBSCRIPTION_ID` secrets are used with `azure/login@v2` and the `id-token: write` permission.
 
 #### Azure Federated Credentials
 

@@ -153,14 +153,35 @@ jobs:
           fi
           echo "::endgroup::"
 
+      - name: Verify Azure secrets are set
+        run: |
+          echo "::group::Azure Secrets Check"
+          if [ -z "${{ secrets.ARM_CLIENT_ID }}" ]; then
+            echo "::error::ARM_CLIENT_ID secret is not set"
+            exit 1
+          fi
+          if [ -z "${{ secrets.ARM_TENANT_ID }}" ]; then
+            echo "::error::ARM_TENANT_ID secret is not set"
+            exit 1
+          fi
+          if [ -z "${{ secrets.ARM_SUBSCRIPTION_ID }}" ]; then
+            echo "::error::ARM_SUBSCRIPTION_ID secret is not set"
+            exit 1
+          fi
+          echo "✅ All Azure secrets are set (values are masked for security)"
+          echo "::endgroup::"
+
       - name: Verify Azure OIDC credentials
         id: azure-check
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ secrets.ARM_CLIENT_ID }}
+          tenant-id: ${{ secrets.ARM_TENANT_ID }}
+          subscription-id: ${{ secrets.ARM_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
+          enable-AzPSSession: false
+          allow-no-subscriptions: false
+          environment: azurecloud
 
       - name: Validate Azure resources
         id: azure-resources
@@ -668,10 +689,13 @@ jobs:
       - name: Azure OIDC login
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ secrets.ARM_CLIENT_ID }}
+          tenant-id: ${{ secrets.ARM_TENANT_ID }}
+          subscription-id: ${{ secrets.ARM_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
+          enable-AzPSSession: false
+          allow-no-subscriptions: false
+          environment: azurecloud
 
       - name: Download terraform outputs
         uses: actions/download-artifact@v4
