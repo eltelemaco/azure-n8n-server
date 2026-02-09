@@ -61,13 +61,14 @@ env:
   TFLINT_VERSION: "v0.53.0"
   HCP_ORG: "TelemacoInfraLabs"
   HCP_WORKSPACE: "azure-n8n-server"
+  # HCP auth uses TF_TOKEN_app_terraform_io (HCP_TERRAFORM_TOKEN); Azure auth uses OIDC (AZURE_* secrets).
 
 # =============================================================================
 # JOB 1: Pre-Flight Validation (Pre-Flight Agent)
 # =============================================================================
 jobs:
   preflight-validation:
-    name: "Pre-Flight Agent: Environment Validation"
+    name: "Environment Validation"
     runs-on: ubuntu-latest
     outputs:
       terraform_version: ${{ steps.tf-version.outputs.version }}
@@ -77,24 +78,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
       - name: Check Terraform version
         id: tf-version
         run: |
           echo "::group::Terraform Version Check"
-          # Install Terraform
-          wget -qO- https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip | funzip > /usr/local/bin/terraform 2>/dev/null || {
-            curl -fsSL https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip -o tf.zip
-            unzip -o tf.zip -d /usr/local/bin/
-            rm -f tf.zip
-          }
-          chmod +x /usr/local/bin/terraform
-
           INSTALLED_VERSION=$(terraform version -json | jq -r '.terraform_version')
           echo "version=${INSTALLED_VERSION}" >> "$GITHUB_OUTPUT"
           echo "Terraform version: ${INSTALLED_VERSION}"
 
           # Validate minimum version requirement
-          REQUIRED_VERSION="1.9.0"
+          REQUIRED_VERSION="${TF_VERSION}"
           if [ "$(printf '%s\n' "$REQUIRED_VERSION" "$INSTALLED_VERSION" | sort -V | head -n1)" != "$REQUIRED_VERSION" ]; then
             echo "::error::Terraform version ${INSTALLED_VERSION} does not meet minimum requirement ${REQUIRED_VERSION}"
             exit 1
