@@ -1,13 +1,17 @@
 # Plan: Azure Landing Zone Foundation Setup
 
 ## Task Description
+
 Initialize the foundational infrastructure for an Azure Landing Zone project using Terraform with HCP (HashiCorp Cloud Platform) state management. This includes setting up version control with git and creating the complete directory structure per the specifications in CLAUDE.md. The setup will establish the organizational structure for environments (dev, staging, production) and reusable Terraform modules (landing-zone, networking, security, compute, governance).
 
 ## Objective
+
 Complete the foundation setup by initializing a git repository with proper configuration and creating the full directory structure that will support a modular Terraform-based Azure landing zone implementation following Azure Well-Architected Framework principles.
 
 ## Problem Statement
+
 The project directory currently contains only the orchestration framework (.claude/) but lacks:
+
 - Version control (git repository)
 - Infrastructure code directory structure
 - Environment-specific configuration directories
@@ -17,6 +21,7 @@ The project directory currently contains only the orchestration framework (.clau
 Without these foundational elements, infrastructure development cannot proceed according to the documented architecture patterns.
 
 ## Solution Approach
+
 Implement a phased approach using specialized agent teams:
 
 1. **Environment Validation Phase**: Verify all required tools (git, terraform) are available before starting
@@ -30,6 +35,7 @@ Each phase uses dedicated builder and validator agent pairs to ensure quality an
 ## Relevant Files
 
 ### Existing Files to Reference
+
 - `.claude/CLAUDE.md` (lines 26-99) - Defines the complete directory structure and conventions to implement
 - `.claude/CLAUDE.md` (lines 619-620) - Specifies .gitignore patterns for Terraform projects
 - `.claude/agents/team/builder.md` - Builder agent definition for implementation tasks
@@ -39,12 +45,14 @@ Each phase uses dedicated builder and validator agent pairs to ensure quality an
 ### New Files to Create
 
 #### Root Level Files
+
 - `.gitignore` - Git ignore patterns for Terraform state files, .terraform directories, *.tfvars, .env files
 - `README.md` - Project overview, architecture description, setup instructions, usage guide
 - `terraform.tfvars.example` - Template for environment-specific variable values
 - `versions.tf` - Terraform version constraints and required provider versions
 
 #### Environment Directories
+
 - `environments/dev/main.tf` - Dev environment root module
 - `environments/dev/variables.tf` - Dev-specific variable declarations
 - `environments/dev/outputs.tf` - Dev environment outputs
@@ -54,6 +62,7 @@ Each phase uses dedicated builder and validator agent pairs to ensure quality an
 - `environments/production/` - Same structure as dev
 
 #### Module Directories
+
 - `modules/landing-zone/main.tf` - Core landing zone module resources
 - `modules/landing-zone/variables.tf` - Landing zone input variables
 - `modules/landing-zone/outputs.tf` - Landing zone outputs
@@ -66,6 +75,7 @@ Each phase uses dedicated builder and validator agent pairs to ensure quality an
 ## Implementation Phases
 
 ### Phase 1: Foundation
+
 **Duration**: Single sequential execution
 **Focus**: Environment validation and git initialization
 
@@ -81,6 +91,7 @@ Each phase uses dedicated builder and validator agent pairs to ensure quality an
    - Default branch configuration (main)
 
 ### Phase 2: Core Implementation
+
 **Duration**: Parallel execution where possible
 **Focus**: Directory structure creation and template files
 
@@ -99,6 +110,7 @@ Each phase uses dedicated builder and validator agent pairs to ensure quality an
    - Root-level .gitignore with Terraform-specific patterns
 
 ### Phase 3: Integration & Polish
+
 **Duration**: Sequential validation and documentation
 **Focus**: Verification, documentation, and final validation
 
@@ -177,6 +189,7 @@ You operate as the team lead and orchestrate the team to execute the plan. You'r
 **IMPORTANT**: Execute every step in order, top to bottom. Each task maps directly to a `TaskCreate` call. Before you start, run `TaskCreate` to create the initial task list that all team members can see and execute.
 
 ### 1. Pre-Flight Environment Check
+
 - **Task ID**: preflight-env-check
 - **Depends On**: none
 - **Assigned To**: preflight-env-check
@@ -192,6 +205,7 @@ You operate as the team lead and orchestrate the team to execute the plan. You'r
 - Provide remediation steps if any tools are missing or misconfigured
 
 ### 2. Initialize Git Repository
+
 - **Task ID**: git-repo-init
 - **Depends On**: preflight-env-check
 - **Assigned To**: git-setup-builder
@@ -210,6 +224,7 @@ You operate as the team lead and orchestrate the team to execute the plan. You'r
 - Configure default branch name as `main`
 
 ### 3. Validate Git Setup
+
 - **Task ID**: git-setup-validation
 - **Depends On**: git-repo-init
 - **Assigned To**: git-setup-validator
@@ -223,6 +238,7 @@ You operate as the team lead and orchestrate the team to execute the plan. You'r
 - Report any issues with git configuration or .gitignore patterns
 
 ### 4. Create Directory Structure
+
 - **Task ID**: directory-structure-creation
 - **Depends On**: git-setup-validation
 - **Assigned To**: directory-structure-builder
@@ -245,6 +261,7 @@ You operate as the team lead and orchestrate the team to execute the plan. You'r
 - Follow naming conventions from CLAUDE.md (snake_case for variables, kebab-case for modules)
 
 ### 5. Validate Directory Structure
+
 - **Task ID**: directory-structure-validation
 - **Depends On**: directory-structure-creation
 - **Assigned To**: directory-structure-validator
@@ -263,6 +280,7 @@ You operate as the team lead and orchestrate the team to execute the plan. You'r
 - Report any missing directories or files
 
 ### 6. Generate Project Documentation
+
 - **Task ID**: readme-documentation
 - **Depends On**: directory-structure-validation
 - **Assigned To**: readme-documentation-builder
@@ -287,6 +305,7 @@ You operate as the team lead and orchestrate the team to execute the plan. You'r
 - Include project status badge indicating "Foundation - Ready for Development"
 
 ### 7. Validate Documentation
+
 - **Task ID**: documentation-validation
 - **Depends On**: readme-documentation
 - **Assigned To**: readme-documentation-validator
@@ -302,6 +321,7 @@ You operate as the team lead and orchestrate the team to execute the plan. You'r
 - Report any missing sections or formatting issues
 
 ### 8. Final Comprehensive Validation
+
 - **Task ID**: final-validation-all
 - **Depends On**: documentation-validation
 - **Assigned To**: final-validation-agent
@@ -331,7 +351,7 @@ Foundation setup is complete when ALL of the following criteria are met:
 
 1. **Git Repository**
    - [ ] Git repository initialized (`.git/` directory exists)
-   - [ ] `.gitignore` file exists with Terraform-specific patterns (*.tfstate, .terraform/, *.tfvars, .env)
+   - [ ] `.gitignore` file exists with Terraform-specific patterns (*.tfstate, .terraform/,*.tfvars, .env)
    - [ ] Initial commit created with orchestration framework
    - [ ] Default branch configured as `main`
    - [ ] Working tree is clean or has only documented changes
@@ -425,20 +445,25 @@ echo "Total README files: $(find . -name 'README.md' -type f | wc -l)"
 ## Notes
 
 ### Dependencies
+
 - This plan creates foundational structure only - no actual infrastructure code implementation
 - Terraform modules will contain placeholder comments - actual resource definitions will be implemented in subsequent plans
 - HCP Terraform workspace configuration in backend.tf will need organization name and workspace names (to be configured later)
 
 ### Azure Authentication
+
 - Azure CLI must be installed and available, but authentication (`az login`) is not required for foundation setup
 - Actual Azure operations will require authentication in later phases
 
 ### HCP Terraform Setup
+
 - HCP Terraform account creation and workspace setup is documented but not automated
 - Users will need to run `terraform login` manually and configure organization/workspace names in backend.tf
 
 ### `.gitignore` Critical Patterns
+
 The .gitignore MUST include (per CLAUDE.md requirements):
+
 - `*.tfstate` and `*.tfstate.backup` - State files contain sensitive data, never commit
 - `.terraform/` - Provider plugins cache, regenerated on init
 - `*.tfvars` - Contains sensitive values like credentials (but allow `*.tfvars.example`)
@@ -446,10 +471,13 @@ The .gitignore MUST include (per CLAUDE.md requirements):
 - `*.pem`, `*.key` - SSH keys and certificates
 
 The .gitignore must NOT ignore:
+
 - `.terraform.lock.hcl` - Dependency lock file (should be committed for reproducibility)
 
 ### Next Steps After Foundation
+
 Once foundation is complete, subsequent development will include:
+
 1. Implement networking module (VNets, subnets, NSGs)
 2. Implement security module (Azure Policy, RBAC, Key Vault)
 3. Implement compute module (VM instances)
@@ -459,7 +487,9 @@ Once foundation is complete, subsequent development will include:
 7. Deploy to dev environment for validation
 
 ### File Count Validation
+
 Expected minimum file counts after completion:
+
 - Environment files: 15 (3 environments × 5 files each)
 - Module files: 20 (5 modules × 4 files each)
 - Root files: 4 (versions.tf, terraform.tfvars.example, README.md, .gitignore)
