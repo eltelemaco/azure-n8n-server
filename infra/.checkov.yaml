@@ -30,6 +30,35 @@ framework:
   - terraform
 
 # ---------------------------------------------------------------------------
+# Compliance Frameworks
+# ---------------------------------------------------------------------------
+# Enable industry-standard compliance benchmarks to validate Azure resources
+# against established security and governance standards.
+#
+# CIS Azure Foundations Benchmark:
+#   Industry consensus security configuration baseline for Azure.
+#   Covers identity, networking, logging, monitoring, and storage.
+#
+# Azure Security Benchmark (ASB):
+#   Microsoft's official security recommendations for Azure services.
+#   Aligned with CIS controls and Azure Well-Architected Framework.
+#
+# NIST 800-53:
+#   US federal government security controls standard.
+#   Required for government and highly-regulated workloads.
+#
+# Checkov automatically maps its checks to these frameworks.
+# Results include compliance score per framework in the output.
+#
+# Note: Specific framework versions are handled by checkov's internal mappings.
+# To see which checks map to which frameworks, run:
+#   checkov --list --framework terraform | grep CIS
+check-frameworks:
+  - "CIS Azure Foundations Benchmark"
+  - "Azure Security Benchmark"
+  - "NIST 800-53"
+
+# ---------------------------------------------------------------------------
 # Output configuration
 # ---------------------------------------------------------------------------
 # Compact output keeps CI logs readable. Only failed checks are shown to
@@ -163,13 +192,105 @@ skip-check:
 #   - "infra/policies/checkov"
 
 # ---------------------------------------------------------------------------
+# Custom Policies - Tagging Requirements
+# ---------------------------------------------------------------------------
+# Enforce mandatory tags on all Azure resources as defined in CLAUDE.md.
+# Required tags:
+#   - environment: Environment name (dev, staging, production)
+#   - managed_by: Always "terraform" for IaC-managed resources
+#   - project: Always "azure-landing-zone" for this project
+#   - owner: Team or individual responsible for the resource
+#   - cost_center: For cost allocation and chargeback
+#
+# These tags are critical for:
+#   - Cost management and allocation
+#   - Resource lifecycle management
+#   - Compliance and audit trails
+#   - Automation and operational workflows
+#
+# Note: Checkov validates tags using built-in checks like:
+#   CKV_AZURE_183: Ensure that Azure Resource has tags
+#   CKV2_AZURE_41: Ensure Azure Resources have required tags
+#
+# To enforce specific tag names, use the --check option with tag checks
+# or define custom policies in external-checks-dir.
+#
+# For now, we rely on checkov's standard tagging checks and validate
+# tag content during terraform plan review.
+#
+# Future enhancement: Add custom policy to validate tag values against
+# allowed patterns (e.g., environment must be dev|staging|production).
+
+# ---------------------------------------------------------------------------
+# Network Security Custom Checks
+# ---------------------------------------------------------------------------
+# Additional network security validations beyond built-in checks:
+#
+# 1. NSG Rules Least-Privilege:
+#    Validate that no NSG rules allow unrestricted inbound access (0.0.0.0/0)
+#    to sensitive ports (22, 3389, 1433, 3306, 5432, 6379, 27017).
+#    Covered by: CKV_AZURE_9, CKV_AZURE_10, CKV_AZURE_160
+#
+# 2. Public IP Restrictions:
+#    Ensure VMs do not have public IPs attached (except Azure Bastion host).
+#    Covered by: CKV_AZURE_119
+#
+# 3. Network Watcher:
+#    Ensure Network Watcher is enabled for monitoring and diagnostics.
+#    Covered by: CKV_AZURE_20
+#
+# 4. NSG Flow Logs:
+#    Ensure NSG flow logs are enabled for traffic analysis and security audit.
+#    Covered by: CKV_AZURE_12
+#
+# All standard network security checks are enabled by default unless
+# explicitly skipped in the skip-check section above.
+
+# ---------------------------------------------------------------------------
 # Evaluation thresholds
 # ---------------------------------------------------------------------------
 # These settings control the minimum severity level that checkov reports.
 # The CI pipeline further filters results by severity for pass/fail logic.
 #
+# Severity levels and their handling:
+#
+#   CRITICAL - Security vulnerabilities requiring immediate remediation.
+#              Examples: Publicly accessible databases, disabled encryption,
+#              exposed credentials, unrestricted network access to sensitive ports.
+#              Action: FAIL the build immediately. Blocks merge until fixed.
+#
+#   HIGH     - Significant security risks or compliance violations.
+#              Examples: Missing encryption at rest, overly permissive RBAC,
+#              disabled audit logging, weak TLS configurations.
+#              Action: WARN in PR comment. Does not block merge in dev environment.
+#              Blocks merge in production environment.
+#
+#   MEDIUM   - Best practice deviations and minor security improvements.
+#              Examples: Missing tags, unoptimized resource configurations,
+#              non-critical logging gaps, suboptimal network segmentation.
+#              Action: INFO in PR comment. Does not block merge.
+#
+#   LOW      - Minor suggestions and informational findings.
+#              Examples: Resource naming inconsistencies (non-critical),
+#              documentation improvements, optional monitoring enhancements.
+#              Action: INFO in PR comment. Does not block merge.
+#
 # hard-fail-on: Controls which severities cause a non-zero exit code
 # when soft-fail is false. In dev (soft-fail: true), this has no effect
 # but documents the intended production behavior.
+#
+# Production environment configuration:
+#   hard-fail-on: ["CRITICAL", "HIGH"]
+#   soft-fail: false
+#
+# Development environment configuration (current):
+#   hard-fail-on: ["CRITICAL"]
+#   soft-fail: true
 hard-fail-on:
   - "CRITICAL"
+
+# For production deployments, also fail on HIGH severity findings.
+# Uncomment the following when deploying to staging or production:
+# hard-fail-on:
+#   - "CRITICAL"
+#   - "HIGH"

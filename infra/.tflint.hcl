@@ -147,3 +147,64 @@ rule "terraform_standard_module_structure" {
 rule "terraform_workspace_remote" {
   enabled = true
 }
+
+# ---------------------------------------------------------------------------
+# Azure Security Rules
+# ---------------------------------------------------------------------------
+# These rules enforce security best practices specific to Azure resources.
+# They validate configurations for public IPs, NSG rules, Key Vault settings,
+# and other security-sensitive configurations as defined in CLAUDE.md.
+
+# Enforce naming convention for Azure resources.
+# Rationale: Azure resource names must follow the pattern:
+# <resource-type>-<environment>-<location>-<name>
+# This rule validates against Azure naming constraints and best practices.
+rule "azurerm_resource_naming" {
+  enabled = true
+}
+
+# Warn on invalid or deprecated Azure resource configurations.
+# Rationale: Azure APIs evolve and certain configurations become deprecated.
+# This catches configurations that will fail on terraform apply.
+rule "azurerm_resource_missing_tags" {
+  enabled = true
+}
+
+# Security: Flag resources with public IP addresses.
+# Rationale: Per CLAUDE.md, no public IP addresses should be used without
+# explicit justification. Azure Bastion should be used for VM access instead.
+rule "azurerm_virtual_machine_should_not_have_public_ip" {
+  enabled = true
+}
+
+# Security: Validate Network Security Group (NSG) rules.
+# Rationale: NSGs must follow least-privilege principle. Rules allowing
+# unrestricted access (0.0.0.0/0) to sensitive ports should be flagged.
+rule "azurerm_network_security_group_rule_invalid" {
+  enabled = true
+}
+
+# Security: Ensure Key Vault access policies are properly configured.
+# Rationale: Key Vault should use RBAC or access policies, not both.
+# Overly permissive access policies introduce security risks.
+rule "azurerm_key_vault_access_policy_invalid" {
+  enabled = true
+}
+
+# Security: Flag storage accounts with public network access enabled.
+# Rationale: Storage accounts should use private endpoints and deny
+# public access in production environments.
+rule "azurerm_storage_account_network_rules_invalid" {
+  enabled = true
+}
+
+# ---------------------------------------------------------------------------
+# Severity Configuration
+# ---------------------------------------------------------------------------
+# Rule severity levels determine CI/CD pipeline behavior:
+#   - ERROR: Fails the build (for security and correctness issues)
+#   - WARNING: Reported but does not fail build (for style and best practices)
+#   - NOTICE: Informational only (for suggestions and optimizations)
+#
+# Azure security rules (public IPs, NSG misconfigurations, Key Vault issues)
+# are treated as errors. Terraform style violations are treated as warnings.

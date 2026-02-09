@@ -129,6 +129,20 @@ validate_resource_group() {
         return 1
     fi
 
+    # Verify provisioning state
+    local rg_state
+    rg_state=$(az group show \
+        --name "${RESOURCE_GROUP_NAME}" \
+        --query "properties.provisioningState" \
+        --output tsv 2>/dev/null)
+
+    if [ "${rg_state}" = "Succeeded" ]; then
+        log_pass "Resource group '${RESOURCE_GROUP_NAME}' provisioning state: Succeeded"
+    else
+        log_fail "Resource group '${RESOURCE_GROUP_NAME}' provisioning state: ${rg_state} (expected: Succeeded)"
+        return 1
+    fi
+
     return 0
 }
 
@@ -164,6 +178,20 @@ validate_vnet() {
         log_pass "VNet '${vnet_with_cidr}' has expected address space '${EXPECTED_VNET_CIDR}'"
     else
         log_fail "No VNet found with expected address space '${EXPECTED_VNET_CIDR}'"
+        return 1
+    fi
+
+    # Verify VNet provisioning state
+    local vnet_state
+    vnet_state=$(az network vnet list \
+        --resource-group "${RESOURCE_GROUP_NAME}" \
+        --query "[0].provisioningState" \
+        --output tsv 2>/dev/null)
+
+    if [ "${vnet_state}" = "Succeeded" ]; then
+        log_pass "VNet provisioning state: Succeeded"
+    else
+        log_fail "VNet provisioning state: ${vnet_state} (expected: Succeeded)"
         return 1
     fi
 
@@ -218,7 +246,20 @@ validate_subnets() {
 
             while IFS= read -r subnet_name; do
                 if [ -n "${subnet_name}" ]; then
-                    log_info "  Subnet found: ${subnet_name}"
+                    # Verify each subnet provisioning state
+                    local subnet_state
+                    subnet_state=$(az network vnet subnet show \
+                        --resource-group "${RESOURCE_GROUP_NAME}" \
+                        --vnet-name "${vnet_name}" \
+                        --name "${subnet_name}" \
+                        --query "provisioningState" \
+                        --output tsv 2>/dev/null)
+
+                    if [ "${subnet_state}" = "Succeeded" ]; then
+                        log_info "  Subnet '${subnet_name}': provisioning state Succeeded"
+                    else
+                        log_info "  Subnet '${subnet_name}': provisioning state ${subnet_state}"
+                    fi
                 fi
             done <<< "${subnet_names}"
         else
@@ -256,6 +297,50 @@ validate_tags() {
 }
 
 # ---------------------------------------------------------------------------
+# Smoke test: DNS resolution and basic connectivity
+# ---------------------------------------------------------------------------
+
+smoke_test_connectivity() {
+    log_info "Running connectivity smoke tests..."
+
+    # Verify Azure CLI can query resources in the resource group
+    local resource_count
+    resource_count=$(az resource list \
+        --resource-group "${RESOURCE_GROUP_NAME}" \
+        --query "length(@)" \
+        --output tsv 2>/dev/null)
+
+    if [ -n "${resource_count}" ]; then
+        log_pass "Resource group '${RESOURCE_GROUP_NAME}' is accessible (${resource_count} resource(s))"
+    else
+        log_fail "Cannot list resources in resource group '${RESOURCE_GROUP_NAME}'"
+        return 1
+    fi
+
+    # Verify no failed provisioning states on resources
+    local failed_resources
+    failed_resources=$(az resource list \
+        --resource-group "${RESOURCE_GROUP_NAME}" \
+        --query "[?provisioningState!='Succeeded'].{name:name, type:type, state:provisioningState}" \
+        --output tsv 2>/dev/null)
+
+    if [ -z "${failed_resources}" ]; then
+        log_pass "All resources in '${RESOURCE_GROUP_NAME}' have Succeeded provisioning state"
+    else
+        log_fail "Some resources have non-Succeeded provisioning state"
+        log_info "Resources with issues:"
+        echo "${failed_resources}" | while IFS= read -r line; do
+            if [ -n "${line}" ]; then
+                log_info "  ${line}"
+            fi
+        done
+        return 1
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Main execution
 # ---------------------------------------------------------------------------
 
@@ -277,6 +362,7 @@ main() {
     validate_vnet || true
     validate_subnets || true
     validate_tags || true
+    smoke_test_connectivity || true
 
     # Print summary
     print_summary

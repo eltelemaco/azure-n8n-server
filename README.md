@@ -20,6 +20,7 @@ A production-ready Azure Landing Zone built with Terraform and managed through H
 - [Module Documentation](#module-documentation)
 - [Environment Configuration](#environment-configuration)
 - [Contributing](#contributing)
+- [CI/CD with GitHub Actions](#cicd-with-github-actions)
 - [References](#references)
 
 ---
@@ -457,6 +458,179 @@ This project uses coding conventions and workflows documented in [`CLAUDE.md`](C
 - [ ] No sensitive values hardcoded in source files
 - [ ] All resources have required tags
 - [ ] Module README updated if inputs/outputs changed
+
+---
+
+## CI/CD with GitHub Actions
+
+This project uses two GitHub Actions workflows to automate Terraform validation, security scanning, and deployment. Both workflows follow the **Agent Team Pattern**, where each job represents a specialized agent responsible for a specific phase of the pipeline.
+
+### Workflows Overview
+
+| Workflow | File | Trigger | Purpose |
+|----------|------|---------|---------|
+| **Terraform PR Checks** | `.github/workflows/terraform-pr-checks.yml` | Pull requests to `main` | Fast feedback: format, validate, security scan, plan, and post a PR comment with results |
+| **Terraform Deploy** | `.github/workflows/terraform-deploy.yml` | Push to `main` / manual dispatch | Full deployment: pre-flight, format, validate, security scan, plan, approval gate, apply, post-apply validation, and documentation update |
+
+### Workflow Triggers
+
+**PR Checks** runs automatically when a pull request targets `main` and modifies any of these paths:
+
+- `infra/**/*.tf` -- Terraform configuration files
+- `infra/**/*.tfvars` -- Variable value files
+- `.github/workflows/terraform-pr-checks.yml` -- The workflow itself
+- `.github/actions/setup-terraform/**` -- The shared composite action
+
+**Deploy** runs when commits are pushed to `main` that modify `infra/**/*.tf` files. It can also be triggered manually via `workflow_dispatch` with an optional `skip_approval` input (only honored for LOW-risk changes).
+
+Both workflows use concurrency controls. PR Checks cancels in-progress runs for the same PR. Deploy prevents concurrent deployments but does not cancel running ones.
+
+### Required Setup
+
+#### GitHub Secrets
+
+The following repository secrets must be configured under **Settings > Secrets and variables > Actions**:
+
+| Secret | Purpose | How to Obtain |
+|--------|---------|---------------|
+| `HCP_TERRAFORM_TOKEN` | Authenticates with HCP Terraform for remote state, plan, and apply | Generate at [HCP Terraform > User Settings > Tokens](https://app.terraform.io/app/settings/tokens). Use a **team token** for CI/CD. |
+| `AZURE_CLIENT_ID` | Azure AD application (service principal) client ID for OIDC authentication | From the app registration in Azure AD |
+| `AZURE_TENANT_ID` | Azure AD tenant ID | From Azure AD > Properties |
+| `AZURE_SUBSCRIPTION_ID` | Target Azure subscription ID | From the Azure Portal subscriptions page |
+
+> **Note:** Azure authentication uses OpenID Connect (OIDC) federated credentials -- no client secret is stored in GitHub. The `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID` secrets are used with `azure/login@v2` and the `id-token: write` permission.
+
+#### Azure Federated Credentials
+
+The Azure AD app registration needs **three federated identity credentials** so GitHub Actions can authenticate via OIDC in different contexts:
+
+| Credential | Subject Identifier | When Used |
+|------------|-------------------|-----------|
+| **Main branch** | `repo:<owner>/<repo>:ref:refs/heads/main` | Deploy workflow jobs running on pushes to `main` |
+| **Pull requests** | `repo:<owner>/<repo>:pull_request` | PR Checks workflow jobs |
+| **Environment: dev-approval** | `repo:<owner>/<repo>:environment:dev-approval` | The approval-gate job in the Deploy workflow |
+
+To create these in Azure:
+
+1. Navigate to **Azure AD > App registrations > [your app] > Certificates & secrets > Federated credentials**
+2. Click **Add credential** and choose **GitHub Actions deploying Azure resources**
+3. Fill in the organization, repository, and entity type (Branch, Pull Request, or Environment) for each of the three credentials above
+4. Set the audience to `api://AzureADTokenExchange`
+
+#### GitHub Environment
+
+Create a GitHub environment named **`dev-approval`** under **Settings > Environments**:
+
+1. Click **New environment** and name it `dev-approval`
+2. Enable **Required reviewers** and add the team members or individuals who should approve deployments
+3. Optionally set a **wait timer** (e.g., 5 minutes) for additional delay before approval
+4. The Deploy workflow uses this environment for the `approval-gate` job, which runs only for MEDIUM and HIGH risk changes
+
+#### Branch Protection Rules
+
+Recommended branch protection rules for `main`:
+
+- Require pull request reviews before merging
+- Require status checks to pass before merging (add `Terraform PR Checks` jobs as required)
+- Require branches to be up to date before merging
+- Do not allow bypassing the above settings
+
+### Approval Process
+
+The Deploy workflow includes a risk-based approval gate. After the plan is generated, the **Validator Agent** analyzes the plan JSON and assigns a risk level:
+
+| Risk Level | Condition | Approval Required |
+|------------|-----------|-------------------|
+| **LOW** | Only resource additions (no changes or deletions) | No -- deployment proceeds automatically |
+| **MEDIUM** | Resource modifications or security-relevant changes (NSGs, Key Vault, RBAC) | Yes -- requires manual approval via the `dev-approval` environment |
+| **HIGH** | Resource deletions or replacements (delete + create) | Yes -- requires manual approval via the `dev-approval` environment |
+
+**How to approve a deployment:**
+
+1. Navigate to the workflow run in **Actions**
+2. The `approval-gate` job will show as "Waiting" with a yellow badge
+3. Click **Review deployments**
+4. Select the `dev-approval` environment and click **Approve and deploy**
+5. The pipeline will resume with `terraform apply`
+
+If the `skip_approval` input is set to `true` on a manual dispatch and the risk level is LOW, the approval gate is skipped.
+
+### Agent Team Pattern
+
+Both workflows implement the Agent Team Pattern where each job represents a specialized agent role:
+
+| Agent Role | PR Checks Jobs | Deploy Jobs | Purpose |
+|------------|---------------|-------------|---------|
+| **Pre-Flight** | -- | `preflight-validation` | Validates environment readiness: Terraform version, HCP workspace status, Azure OIDC connectivity |
+| **Builder** | `builder-format-check`, `builder-validate`, `builder-plan` | `builder-format-validate`, `builder-plan`, `builder-apply` | Executes Terraform operations: format checking, validation, plan generation, and apply |
+| **Validator** | `validator-security-scan`, `validator-plan-review` | `validator-security-scan`, `validator-plan-review`, `validator-post-apply` | Verifies correctness: tflint, checkov security scanning, plan risk assessment, post-apply smoke tests |
+| **Status** | `status-start`, `status-comment` | `status-final` | Communicates results: initial PR comment, updated status table, final deployment summary |
+| **Documentation** | -- | `documentation-update` | Updates README.md with deployment outputs (environment, region, resource group, commit SHA) |
+
+**Job dependency chain (Deploy):**
+
+```
+preflight-validation
+  -> builder-format-validate
+    -> validator-security-scan
+      -> builder-plan
+        -> validator-plan-review
+          -> approval-gate (MEDIUM/HIGH risk only)
+            -> builder-apply
+              -> validator-post-apply
+                -> documentation-update
+                  -> status-final
+```
+
+### Shared Composite Action
+
+Both workflows use a reusable composite action at `.github/actions/setup-terraform/action.yml` that handles:
+
+1. Installing Terraform CLI via `hashicorp/setup-terraform@v3`
+2. Verifying the Terraform version meets the `>= 1.9.0` requirement
+3. Configuring HCP Terraform credentials (`~/.terraform.d/credentials.tfrc.json`)
+4. Verifying the working directory exists and contains `.tf` files
+5. Running `terraform init`
+
+### Troubleshooting
+
+#### Common Workflow Failures
+
+| Symptom | Likely Cause | Resolution |
+|---------|-------------|------------|
+| `terraform init` fails with authentication error | `HCP_TERRAFORM_TOKEN` is missing, expired, or invalid | Regenerate the token in HCP Terraform and update the GitHub secret |
+| `terraform fmt -check` fails | Terraform files are not formatted | Run `terraform fmt -recursive` locally and push the changes |
+| `terraform validate` fails | Syntax errors or missing variable definitions | Check the error output in the workflow logs; fix the HCL syntax locally |
+| Checkov blocks deployment with CRITICAL findings | Security policy violations detected | Review the checkov output in the uploaded artifacts; fix or suppress the finding with an inline skip comment |
+| `terraform plan` exits with code 1 | Plan generation error (provider issues, state lock, invalid references) | Check the full plan output in workflow logs; verify HCP workspace is not locked by another run |
+| Approval gate times out | No reviewer approved within the environment timeout | Re-run the workflow or have a reviewer approve promptly |
+| `terraform apply` fails | Infrastructure error during resource creation/modification | Check the apply output for the specific Azure error; common issues include quota limits, naming conflicts, and permission errors |
+
+#### Debugging Failed Jobs
+
+1. **View workflow logs:** Go to **Actions > [workflow run] > [failed job]** and expand each step
+2. **Check step summaries:** Each job posts a summary to the GitHub Step Summary panel
+3. **Download artifacts:** Plan files and security scan results are uploaded as workflow artifacts (retained for 90 days)
+4. **PR comments:** The PR Checks workflow posts a comprehensive status table as a PR comment with format, validate, scan, plan, and review results
+
+#### HCP Workspace Status Checks
+
+The Deploy workflow pre-flight job validates the HCP workspace before proceeding:
+
+- Checks the workspace exists in the configured organization (`HCP_ORG`)
+- Verifies the API token has access to the workspace
+- Warns if there are active runs (planning, applying, or planned) that could cause state lock conflicts
+
+If the workspace check fails with HTTP 401, the token is invalid. If it fails with HTTP 404, the workspace name or organization name in the workflow environment variables does not match HCP Terraform.
+
+#### Azure OIDC Authentication Issues
+
+| Symptom | Resolution |
+|---------|------------|
+| `AADSTS700016: Application not found` | Verify `AZURE_CLIENT_ID` matches the app registration |
+| `AADSTS700024: Client assertion is not within its valid time range` | Check that the GitHub runner clock is synchronized; re-run the workflow |
+| `AADSTS70021: No matching federated identity record found` | Ensure all three federated credentials (main branch, pull_request, dev-approval environment) are configured with the correct subject identifiers |
+| `AuthorizationFailed` during `az` commands | The app registration service principal needs Contributor (or Owner) role on the target subscription |
 
 ---
 

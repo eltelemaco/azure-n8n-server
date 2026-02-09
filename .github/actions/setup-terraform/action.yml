@@ -31,25 +31,40 @@ inputs:
 runs:
   using: "composite"
   steps:
+    # ------------------------------------------------------------------
     # Step 1: Install Terraform CLI using the official HashiCorp action
+    # ------------------------------------------------------------------
     - name: Install Terraform CLI
       uses: hashicorp/setup-terraform@v3
       with:
         cli_config_credentials_token: ${{ inputs.hcp-token }}
 
+    # ------------------------------------------------------------------
     # Step 2: Verify Terraform version meets minimum requirement (>= 1.9.0)
+    # ------------------------------------------------------------------
     - name: Verify Terraform version
       shell: bash
       run: |
         echo "::group::Terraform Version Check"
 
+        # Retrieve installed version
         TERRAFORM_VERSION=$(terraform version -json | jq -r '.terraform_version')
+        if [ -z "${TERRAFORM_VERSION}" ] || [ "${TERRAFORM_VERSION}" = "null" ]; then
+          echo "::error::Failed to determine Terraform version. Is Terraform installed?"
+          exit 1
+        fi
         echo "Installed Terraform version: ${TERRAFORM_VERSION}"
 
-        # Parse major, minor, patch from version string
+        # Parse major.minor.patch from version string
         IFS='.' read -r MAJOR MINOR PATCH <<< "${TERRAFORM_VERSION}"
 
-        # Verify >= 1.6.0
+        # Validate parsed values are numeric
+        if ! [[ "${MAJOR}" =~ ^[0-9]+$ ]] || ! [[ "${MINOR}" =~ ^[0-9]+$ ]]; then
+          echo "::error::Unable to parse Terraform version '${TERRAFORM_VERSION}'"
+          exit 1
+        fi
+
+        # Check >= 1.9.0
         MEETS_REQUIREMENT=false
         if [ "${MAJOR}" -gt 1 ]; then
           MEETS_REQUIREMENT=true
@@ -65,21 +80,91 @@ runs:
         echo "Terraform version ${TERRAFORM_VERSION} meets requirement >= 1.9.0"
         echo "::endgroup::"
 
-    # Step 3: Verify HCP Terraform authentication
-    - name: Verify HCP Terraform authentication
+    # ------------------------------------------------------------------
+    # Step 3: Configure HCP Terraform credentials
+    #   Creates ~/.terraform.d/credentials.tfrc.json so that terraform
+    #   commands (init, plan, apply) can authenticate with HCP Terraform.
+    #   The hashicorp/setup-terraform action sets a CLI config, but this
+    #   step guarantees the credentials file exists for all consumers.
+    # ------------------------------------------------------------------
+    - name: Configure HCP Terraform credentials
       shell: bash
       run: |
         echo "::group::HCP Terraform Authentication"
 
         if [ -z "${{ inputs.hcp-token }}" ]; then
-          echo "::error::HCP Terraform token is not set"
+          echo "::error::HCP Terraform token is not set. The 'hcp-token' input is required."
           exit 1
         fi
 
-        echo "HCP Terraform token is configured"
+        # Ensure the credentials directory exists
+        CREDENTIALS_DIR="${HOME}/.terraform.d"
+        CREDENTIALS_FILE="${CREDENTIALS_DIR}/credentials.tfrc.json"
+        mkdir -p "${CREDENTIALS_DIR}"
+
+        # Write the credentials file
+        cat > "${CREDENTIALS_FILE}" <<CRED_EOF
+        {
+          "credentials": {
+            "app.terraform.io": {
+              "token": "${{ inputs.hcp-token }}"
+            }
+          }
+        }
+        CRED_EOF
+
+        # Remove leading whitespace from heredoc
+        sed -i 's/^        //' "${CREDENTIALS_FILE}"
+
+        # Restrict permissions to owner-only
+        chmod 600 "${CREDENTIALS_FILE}"
+
+        # Verify the file was created and contains valid JSON
+        if [ ! -f "${CREDENTIALS_FILE}" ]; then
+          echo "::error::Failed to create credentials file at ${CREDENTIALS_FILE}"
+          exit 1
+        fi
+
+        if ! jq empty "${CREDENTIALS_FILE}" 2>/dev/null; then
+          echo "::error::Credentials file is not valid JSON"
+          rm -f "${CREDENTIALS_FILE}"
+          exit 1
+        fi
+
+        echo "HCP Terraform credentials configured at ${CREDENTIALS_FILE}"
         echo "::endgroup::"
 
-    # Step 4: Initialize Terraform in the specified working directory
+    # ------------------------------------------------------------------
+    # Step 4: Verify working directory exists and change to it
+    # ------------------------------------------------------------------
+    - name: Verify working directory
+      shell: bash
+      run: |
+        echo "::group::Working Directory Verification"
+
+        TARGET_DIR="${GITHUB_WORKSPACE}/${{ inputs.working-directory }}"
+        echo "Target working directory: ${TARGET_DIR}"
+
+        if [ ! -d "${TARGET_DIR}" ]; then
+          echo "::error::Working directory '${TARGET_DIR}' does not exist."
+          echo "Verify the 'working-directory' input is correct and the repository has been checked out."
+          exit 1
+        fi
+
+        # Check for at least one .tf file in the directory
+        TF_FILE_COUNT=$(find "${TARGET_DIR}" -maxdepth 1 -name '*.tf' -type f | wc -l)
+        if [ "${TF_FILE_COUNT}" -eq 0 ]; then
+          echo "::warning::No .tf files found in ${TARGET_DIR}. Terraform init may fail."
+        else
+          echo "Found ${TF_FILE_COUNT} .tf file(s) in working directory."
+        fi
+
+        echo "Working directory verified: ${{ inputs.working-directory }}"
+        echo "::endgroup::"
+
+    # ------------------------------------------------------------------
+    # Step 5: Run terraform init
+    # ------------------------------------------------------------------
     - name: Initialize Terraform
       shell: bash
       working-directory: ${{ inputs.working-directory }}
@@ -87,19 +172,48 @@ runs:
         echo "::group::Terraform Init"
         echo "Working directory: ${{ inputs.working-directory }}"
 
-        terraform init -input=false
+        if ! terraform init -input=false 2>&1 | tee /tmp/terraform_init_output.txt; then
+          echo ""
+          echo "::error::Terraform init failed. See output above for details."
+          echo "Common causes:"
+          echo "  - Invalid HCP Terraform credentials"
+          echo "  - Network connectivity issues"
+          echo "  - Missing or invalid backend configuration"
+          echo "  - Provider version conflicts"
+          exit 1
+        fi
 
-        echo "Terraform initialized successfully"
+        echo "Terraform initialized successfully."
         echo "::endgroup::"
 
-    # Step 5: Display initialization summary
-    - name: Display setup summary
+    # ------------------------------------------------------------------
+    # Step 6: Verify initialization was successful
+    # ------------------------------------------------------------------
+    - name: Verify initialization
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        echo "::group::Setup Summary"
+        echo "::group::Initialization Verification"
+
+        # Verify .terraform directory was created (proves init ran)
+        if [ ! -d ".terraform" ]; then
+          echo "::error::Terraform initialization verification failed - .terraform directory not found."
+          exit 1
+        fi
+
+        # Verify terraform can list providers (proves init succeeded)
+        if ! terraform providers 2>&1 | tee /tmp/terraform_providers.txt; then
+          echo "::error::Failed to list Terraform providers. Initialization may be incomplete."
+          exit 1
+        fi
+
+        # Display setup summary
+        echo ""
+        echo "=== Setup Summary ==="
         echo "Terraform version: $(terraform version -json | jq -r '.terraform_version')"
         echo "Working directory: ${{ inputs.working-directory }}"
         echo "Providers initialized:"
-        terraform providers
+        cat /tmp/terraform_providers.txt
+        echo "====================="
+
         echo "::endgroup::"
