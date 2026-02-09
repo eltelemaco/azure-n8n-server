@@ -1,0 +1,183 @@
+[project]
+name = "agentic-orchestration"
+version = "1.0.0"
+description = "Agentic orchestration framework for Claude with comprehensive hooks and agent system"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+
+# Core dependencies used across most hooks
+dependencies = [
+    "python-dotenv>=1.0.0",
+]
+
+# Optional dependency groups for different use cases
+[project.optional-dependencies]
+# LLM integrations for hooks that use AI features
+llm = [
+    "anthropic>=0.39.0",
+    "openai>=1.0.0",
+]
+
+# TTS integrations for audio notifications
+tts = [
+    "elevenlabs>=1.0.0",
+    "openai[voice_helpers]>=1.0.0",
+    "pyttsx3>=2.90",
+]
+
+# Development tools (linting, type checking, testing)
+dev = [
+    "ruff>=0.8.0",
+    "ty>=0.0.15",
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+]
+
+# All optional dependencies combined
+all = [
+    "anthropic>=0.39.0",
+    "openai>=1.0.0",
+    "elevenlabs>=1.0.0",
+    "openai[voice_helpers]>=1.0.0",
+    "pyttsx3>=2.90",
+    "ruff>=0.8.0",
+    "ty>=0.0.15",
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-org/agentic-orchestration"
+Repository = "https://github.com/your-org/agentic-orchestration.git"
+Issues = "https://github.com/your-org/agentic-orchestration/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Tool configurations
+[tool.uv]
+# uv-specific configuration
+
+[tool.uv.sources]
+# Configure uv to use PyPI and allow pre-releases if needed
+# index-url = "https://pypi.org/simple"
+
+# Development dependency groups (replaces deprecated dev-dependencies)
+[dependency-groups]
+dev = [
+    "ruff>=0.8.0",
+    "ty>=0.0.15",
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+]
+
+[tool.ruff]
+# Ruff linting configuration
+# Merged from ruff.toml - https://docs.astral.sh/ruff/configuration/
+target-version = "py311"
+line-length = 100
+indent-width = 4
+
+# Exclude paths
+extend-exclude = [
+    "__pycache__",
+    ".git",
+    ".pytest_cache",
+    "*.pyc",
+    "logs/",
+]
+
+[tool.ruff.lint]
+# Enable specific rule sets
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "W",   # pycodestyle warnings
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+]
+
+# Ignore specific rules
+ignore = [
+    "E501",  # Line too long (handled by formatter)
+    "B008",  # Do not perform function call in argument defaults
+    "B904",  # Within except, raise from err or raise from None
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Ignore import rules for script files
+".claude/hooks/*.py" = ["I001"]
+".claude/status_lines/*.py" = ["I001"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[tool.ty]
+# Ty type checker configuration
+# Merged from ty.toml - https://docs.astral.sh/ty/configuration/
+
+[tool.ty.rules]
+# Ignore unresolved imports for inline scripts that use PEP 723 uv script dependencies
+# These dependencies are declared in script metadata and resolved at runtime by `uv run --script`
+unresolved-import = "ignore"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+    "--cov=.claude",
+    "--cov-report=term-missing",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+]
+
+# Coverage configuration
+[tool.coverage.run]
+source = [".claude/hooks", ".claude/status_lines"]
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+    "*/site-packages/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+
+# Hatch build configuration
+[tool.hatch.build.targets.wheel]
+packages = [".claude"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    ".claude/**/*.py",
+    ".claude/**/*.md",
+    ".claude/**/*.json",
+    "*.toml",
+    "README.md",
+    "LICENSE",
+]
