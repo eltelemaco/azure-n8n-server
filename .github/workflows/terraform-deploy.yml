@@ -32,6 +32,7 @@ on:
       - main
     paths:
       - "infra/**/*.tf"
+      - ".github/workflows/**"
   workflow_dispatch:
     inputs:
       skip_approval:
